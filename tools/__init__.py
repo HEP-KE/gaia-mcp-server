@@ -11,10 +11,13 @@ from .cmd_tools import (
     compute_absolute_magnitudes,
     fetch_gaia_sample,
     plot_cmd,
+    plot_hyades,
     plot_infrared_cmd,
     plot_kinematics_cmd,
+    plot_luminosity_function,
     plot_sky_map,
     plot_variable_stars_cmd,
+    plot_white_dwarfs,
 )
 
 __all__ = [
@@ -27,4 +30,7 @@ __all__ = [
     "plot_variable_stars_cmd",
     "plot_infrared_cmd",
     "plot_sky_map",
+    "plot_hyades",
+    "plot_white_dwarfs",
+    "plot_luminosity_function",
 ]

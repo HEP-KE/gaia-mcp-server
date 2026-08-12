@@ -629,3 +629,209 @@ def plot_sky_map(
             "landmarks": {"Hyades": {"l_deg": 180, "b_deg": -22, "d_pc": 47}},
         },
     )
+
+
+@validate_call
+def plot_hyades(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+) -> ArtifactResult:
+    """Extract the Hyades cluster from the field and draw its HRD.
+
+    Use this tool on the CSV from apply_quality_filters. The Hyades is the
+    nearest open cluster (d = 47 pc) and its members share one proper
+    motion and one parallax — a box in (parallax, pmra, pmdec, l, b) pulls
+    them cleanly out of the field with no colour information used at all.
+    Because the cluster is a single age (~700 Myr) and single metallicity,
+    its main sequence is razor thin compared to the field's spread; its
+    unresolved binaries stand out above it (the paper studies 46 clusters
+    this way, Sect. 4).
+
+    Args:
+        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+            (needs parallax, pmra, pmdec, l, b).
+        output_dir: Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    data = gaia.load_sample_csv(input_file)
+    _require_columns(data, ["parallax", "pmra", "pmdec", "l", "b",
+                            "phot_g_mean_mag", "bp_rp"])
+    members = (
+        (data["parallax"] > 19) & (data["parallax"] < 24)
+        & (data["pmra"] > 80) & (data["pmra"] < 140)
+        & (data["pmdec"] > -60) & (data["pmdec"] < -10)
+        & (np.abs(data["l"] - 180) < 20) & (np.abs(data["b"] + 22) < 20)
+    )
+    cluster = data[members]
+    abs_g_all, abs_g_cl = _abs_g(data), _abs_g(cluster)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6.5))
+    ax1.scatter(data["l"], data["b"], s=1, color="0.8")
+    ax1.scatter(cluster["l"], cluster["b"], s=6, color="C3")
+    ax1.set_xlim(220, 140)
+    ax1.set_ylim(-45, 5)
+    ax1.set_xlabel("galactic longitude $l$ [deg]")
+    ax1.set_ylabel("galactic latitude $b$ [deg]")
+    ax1.set_title(f"Hyades members on the sky — {int(members.sum()):,} stars")
+
+    ax2.hist2d(data["bp_rp"], abs_g_all, bins=300, range=[[-1, 5], [-5, 17]],
+               norm=LogNorm(), cmap="Greys", cmin=1)
+    ax2.scatter(cluster["bp_rp"], abs_g_cl, s=8, color="C3",
+                label="Hyades members")
+    ax2.set_ylim(17, -5)
+    ax2.set_xlabel(r"$G_{BP} - G_{RP}$")
+    ax2.set_ylabel(r"$M_G$")
+    ax2.set_title("One age, one metallicity: a razor-thin sequence")
+    ax2.legend(loc="upper right")
+
+    plot_path = _outdir(output_dir) / "gaia_hyades.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    mean_plx = float(np.mean(cluster["parallax"])) if len(cluster) else float("nan")
+    return ArtifactResult(
+        status="success",
+        files=[str(plot_path)],
+        message=(
+            f"Selected {int(members.sum()):,} Hyades members by parallax and "
+            f"proper motion (mean distance "
+            f"{1000.0 / mean_plx:.1f} pc)." if len(cluster) else
+            "No Hyades members found in this input (needs the 100 pc sample)."
+        ),
+        metadata={
+            "n_members": int(members.sum()),
+            "selection": {"parallax_mas": [19, 24], "pmra_mas_yr": [80, 140],
+                          "pmdec_mas_yr": [-60, -10], "l_deg": [160, 200],
+                          "b_deg": [-42, -2]},
+            "mean_distance_pc": None if not len(cluster) else round(1000.0 / mean_plx, 1),
+            "reference": "Babusiaux et al. 2018, A&A 616, A10, Sect. 4",
+        },
+    )
+
+
+@validate_call
+def plot_white_dwarfs(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+) -> ArtifactResult:
+    """Zoom in on the white dwarf sequence (the paper's Fig. 13).
+
+    Use this tool on the CSV from apply_quality_filters. White dwarfs are
+    selected as everything well below the main sequence
+    (M_G > 3.25 (BP-RP) + 9.63); within 100 pc that is a nearly complete,
+    nearly extinction-free sample of degenerate remnants. At this precision
+    the sequence splits into two parallel tracks — hydrogen- and
+    helium-atmosphere white dwarfs (DA/DB), a bifurcation first seen
+    clearly in exactly this DR2 sample.
+
+    Args:
+        input_file: CSV from fetch_gaia_sample or apply_quality_filters.
+        output_dir: Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    data = gaia.load_sample_csv(input_file)
+    _require_columns(data, ["parallax", "phot_g_mean_mag", "bp_rp"])
+    abs_g = _abs_g(data)
+    wd = abs_g > 3.25 * data["bp_rp"] + 9.63
+    dwarfs = data[wd]
+
+    fig, ax = plt.subplots(figsize=(7, 6.5))
+    ax.scatter(dwarfs["bp_rp"], abs_g[wd], s=3, color="C0", alpha=0.5)
+    ax.set_xlim(-0.7, 1.7)
+    ax.set_ylim(16.5, 8.5)
+    ax.set_xlabel(r"$G_{BP} - G_{RP}$")
+    ax.set_ylabel(r"$M_G$")
+    ax.set_title(f"White dwarfs within 100 pc — {int(wd.sum()):,} stars")
+
+    plot_path = _outdir(output_dir) / "gaia_white_dwarfs.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return ArtifactResult(
+        status="success",
+        files=[str(plot_path)],
+        message=(
+            f"Zoomed on {int(wd.sum()):,} white dwarfs "
+            "(selected by M_G > 3.25(BP-RP) + 9.63)."
+        ),
+        metadata={
+            "n_white_dwarfs": int(wd.sum()),
+            "selection": "abs_g_mag > 3.25 * bp_rp + 9.63",
+            "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 13",
+        },
+    )
+
+
+@validate_call
+def plot_luminosity_function(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+) -> ArtifactResult:
+    """The stellar census: how many stars of each luminosity?
+
+    Use this tool on the CSV from apply_quality_filters. It histograms M_G
+    for the full sample and overlays the 25 pc sample scaled by the volume
+    ratio (64x): where the scaled nearby counts exceed the full sample, the
+    100 pc sample is incomplete (the faint end — the survey is
+    magnitude-limited in G). The headline result: the most common stars are
+    faint M dwarfs, and the Sun (M_G = 4.67) is brighter than the vast
+    majority of its neighbours.
+
+    Args:
+        input_file: CSV from fetch_gaia_sample or apply_quality_filters.
+        output_dir: Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    SUN_ABS_G = 4.67
+
+    data = gaia.load_sample_csv(input_file)
+    _require_columns(data, ["parallax", "phot_g_mean_mag"])
+    abs_g = _abs_g(data)
+    near = data["parallax"] >= 40.0  # d < 25 pc
+    bins = np.arange(-4, 17.5, 0.5)
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    ax.hist(abs_g, bins=bins, histtype="stepfilled", alpha=0.4, color="C0",
+            label=f"d < 100 pc ({len(data):,} stars)")
+    ax.hist(abs_g[near], bins=bins, histtype="step", color="C3", linewidth=1.8,
+            weights=np.full(int(near.sum()), 64.0),
+            label=f"d < 25 pc, scaled x64 ({int(near.sum()):,} stars)")
+    ax.axvline(SUN_ABS_G, color="0.3", linestyle="--", linewidth=1.2)
+    ax.text(SUN_ABS_G + 0.15, ax.get_ylim()[1] * 0.5, "Sun", rotation=90,
+            color="0.3", va="center")
+    ax.set_yscale("log")
+    ax.set_xlabel(r"$M_G$")
+    ax.set_ylabel("stars per 0.5 mag bin")
+    ax.set_title("Luminosity function of the solar neighbourhood")
+    ax.legend(loc="upper left", fontsize="small")
+
+    plot_path = _outdir(output_dir) / "gaia_luminosity_function.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    fainter = float(np.mean(abs_g > SUN_ABS_G))
+    return ArtifactResult(
+        status="success",
+        files=[str(plot_path)],
+        message=(
+            f"Luminosity function of {len(data):,} stars: "
+            f"{100 * fainter:.0f}% are fainter than the Sun; the faint end "
+            "of the 100 pc sample is incomplete where the scaled 25 pc "
+            "counts exceed it."
+        ),
+        metadata={
+            "n_stars": len(data),
+            "n_within_25pc": int(near.sum()),
+            "fraction_fainter_than_sun": round(fainter, 3),
+            "sun_abs_g_mag": SUN_ABS_G,
+        },
+    )

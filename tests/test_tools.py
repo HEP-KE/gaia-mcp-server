@@ -13,10 +13,13 @@ from tools import (
     compute_absolute_magnitudes,
     fetch_gaia_sample,
     plot_cmd,
+    plot_hyades,
     plot_infrared_cmd,
     plot_kinematics_cmd,
+    plot_luminosity_function,
     plot_sky_map,
     plot_variable_stars_cmd,
+    plot_white_dwarfs,
 )
 from tools import gaia
 
@@ -156,6 +159,48 @@ def test_extended_tools_reject_cmd_table(sample_csv, tmp_path):
     cmd_result = compute_absolute_magnitudes(sample_csv, str(tmp_path))
     with pytest.raises(ValueError, match="lacks the column"):
         plot_kinematics_cmd(cmd_result.files[0], str(tmp_path))
+
+
+def make_population_sample():
+    """The 5 filter-test rows plus one Hyades-like member and one white dwarf."""
+    base = make_sample()
+    hyades = base[0:1].copy()
+    hyades["source_id"] = 6
+    hyades["parallax"] = 21.3          # 47 pc
+    hyades["pmra"], hyades["pmdec"] = 105.0, -28.0
+    wd = base[0:1].copy()
+    wd["source_id"] = 7
+    wd["phot_g_mean_mag"] = 13.5       # parallax 50 mas -> M_G = 15
+    wd["bp_rp"] = 0.2                  # 15 > 3.25*0.2 + 9.63: a white dwarf
+    return np.concatenate([base, hyades, wd])
+
+
+@pytest.fixture
+def population_csv(tmp_path):
+    path = tmp_path / "population.csv"
+    gaia.write_sample_csv(make_population_sample(), path)
+    return str(path)
+
+
+def test_hyades_selection(population_csv, tmp_path):
+    result = plot_hyades(population_csv, str(tmp_path))
+    assert result.metadata["n_members"] == 1
+    assert result.metadata["mean_distance_pc"] == pytest.approx(47.0, abs=0.5)
+    assert (tmp_path / "gaia_hyades.png").exists()
+
+
+def test_white_dwarf_selection(population_csv, tmp_path):
+    result = plot_white_dwarfs(population_csv, str(tmp_path))
+    assert result.metadata["n_white_dwarfs"] == 1
+    assert (tmp_path / "gaia_white_dwarfs.png").exists()
+
+
+def test_luminosity_function(population_csv, tmp_path):
+    result = plot_luminosity_function(population_csv, str(tmp_path))
+    # all fixture stars except the Hyades member have parallax 50 mas (< 25 pc)
+    assert result.metadata["n_within_25pc"] == 6
+    assert 0.0 <= result.metadata["fraction_fainter_than_sun"] <= 1.0
+    assert (tmp_path / "gaia_luminosity_function.png").exists()
 
 
 def test_bundled_fallback_rejects_looser_cuts():

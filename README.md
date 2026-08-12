@@ -59,6 +59,9 @@ tests/test_tools.py               tools tested as plain Python, no MCP or networ
 | `plot_variable_stars_cmd(input_file, output_dir)` | DR2-flagged variables on the HRD (Fig. 15) |
 | `plot_infrared_cmd(input_file, output_dir)` | the 2MASS infrared HRD (Fig. 6) |
 | `plot_sky_map(input_file, output_dir)` | the sample in galactic coordinates — Hyades + scanning-law holes |
+| `plot_hyades(input_file, output_dir)` | pull the Hyades out of the field by parallax + proper motion (Sect. 4) |
+| `plot_white_dwarfs(input_file, output_dir)` | zoom on the white dwarf sequence and its H/He bifurcation (Fig. 13) |
+| `plot_luminosity_function(input_file, output_dir)` | the stellar census: M_G histogram, 25 pc vs 100 pc completeness, the Sun's rank |
 
 ### The query
 
