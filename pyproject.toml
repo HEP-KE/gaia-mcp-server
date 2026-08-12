@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaia-mcp-server"
+version = "0.1.0"
+description = "MCP server exposing Gaia DR2 colour-magnitude diagram tools for the HEP-KE tutorial."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp[cli]>=1.27,<2",
+    "pydantic>=2,<3",
+    "numpy",
+    "matplotlib>=3.8",
+    "astroquery",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.mcp-server]
+tool_modules = ["tools"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mcp_server*", "tools*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
