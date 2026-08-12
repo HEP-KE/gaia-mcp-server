@@ -11,7 +11,6 @@ arXiv:1804.09378. The selection below is their Sect. 2.1 (Eqs. 1-3); the
 """
 
 import gzip
-import io
 from pathlib import Path
 
 import numpy as np
@@ -22,10 +21,15 @@ BUNDLED_FILE = DATA_DIR / "gaia_dr2_100pc.csv.gz"
 # The published star count of Babusiaux et al. (2018) Fig. 5c, for comparison.
 PUBLISHED_100PC_COUNT = 212_728
 
-# Columns the pipeline needs. Names are exactly the Gaia archive column names
-# (https://gea.esac.esa.int/archive/) so they can be looked up in the docs.
+# Columns the pipeline carries. Names are exactly the Gaia archive column
+# names (https://gea.esac.esa.int/archive/) so they can be looked up in the
+# docs — with two exceptions created at fetch time: "variable" is
+# phot_variable_flag recoded to 1.0/0.0 (keeps every column numeric), and
+# j_m / ks_m come from the server-side 2MASS cross-match (NaN if unmatched).
 COLUMNS = [
     "source_id",
+    "l",
+    "b",
     "parallax",
     "parallax_over_error",
     "phot_g_mean_mag",
@@ -37,7 +41,18 @@ COLUMNS = [
     "visibility_periods_used",
     "astrometric_chi2_al",
     "astrometric_n_good_obs_al",
+    "pmra",
+    "pmdec",
+    "radial_velocity",
+    "variable",
+    "j_m",
+    "ks_m",
 ]
+
+# What the ADQL actually selects (the archive has no "variable" column).
+_ADQL_COLUMNS = [
+    f"g.{name}" for name in COLUMNS if name not in ("variable", "j_m", "ks_m")
+] + ["g.phot_variable_flag", "tm.j_m", "tm.ks_m"]
 
 # The bundled file was fetched with exactly these cuts; a fallback query
 # cannot go below them.
@@ -48,13 +63,34 @@ BUNDLED_MIN_PARALLAX_SNR = 10.0
 def build_adql(min_parallax_mas: float, min_parallax_snr: float) -> str:
     """The full-sample ADQL query (no TOP: a truncated result is NOT a random
     sample — the archive returns rows in an arbitrary, correlated order; use
-    the random_index column if you ever need an unbiased subsample)."""
+    the random_index column if you ever need an unbiased subsample). The two
+    LEFT JOINs attach 2MASS infrared photometry server-side where a
+    cross-match exists."""
     return (
-        f"SELECT {', '.join(COLUMNS)} "
-        "FROM gaiadr2.gaia_source "
-        f"WHERE parallax >= {min_parallax_mas} "
-        f"AND parallax_over_error > {min_parallax_snr}"
+        f"SELECT {', '.join(_ADQL_COLUMNS)} "
+        "FROM gaiadr2.gaia_source AS g "
+        "LEFT OUTER JOIN gaiadr2.tmass_best_neighbour AS bn "
+        "ON g.source_id = bn.source_id "
+        "LEFT OUTER JOIN gaiadr1.tmass_original_valid AS tm "
+        "ON bn.tmass_oid = tm.tmass_oid "
+        f"WHERE g.parallax >= {min_parallax_mas} "
+        f"AND g.parallax_over_error > {min_parallax_snr}"
     )
+
+
+def table_to_array(table) -> "np.ndarray":
+    """Astropy Table (from the archive) -> numeric structured array with
+    COLUMNS as fields: masked entries become NaN, phot_variable_flag becomes
+    the 1.0/0.0 column "variable"."""
+    out = np.zeros(len(table), dtype=[(name, "f8") for name in COLUMNS])
+    for name in COLUMNS:
+        if name == "variable":
+            flags = np.asarray(table["phot_variable_flag"]).astype(str)
+            out[name] = (flags == "VARIABLE").astype(float)
+        else:
+            column = np.ma.asarray(table[name]).astype(float)
+            out[name] = np.ma.filled(column, np.nan)
+    return out
 
 
 def query_archive(min_parallax_mas: float, min_parallax_snr: float) -> "np.ndarray":
@@ -64,11 +100,7 @@ def query_archive(min_parallax_mas: float, min_parallax_snr: float) -> "np.ndarr
     from astroquery.gaia import Gaia  # imported here: bundled mode works without it
 
     job = Gaia.launch_job_async(build_adql(min_parallax_mas, min_parallax_snr))
-    table = job.get_results()
-    buffer = io.StringIO()
-    table.write(buffer, format="ascii.csv")
-    buffer.seek(0)
-    return np.genfromtxt(buffer, delimiter=",", names=True)
+    return table_to_array(job.get_results())
 
 
 def load_bundled(min_parallax_mas: float, min_parallax_snr: float) -> "np.ndarray":

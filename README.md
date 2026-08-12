@@ -55,6 +55,10 @@ tests/test_tools.py               tools tested as plain Python, no MCP or networ
 | `compute_absolute_magnitudes(input_file, output_dir)` | M_G = G + 5 log₁₀(ϖ/mas) − 10 |
 | `plot_cmd(input_file, output_dir, ...)` | log-density HRD, axes matched to the published Fig. 5c |
 | `compare_distance_shells(input_file, output_dir, ...)` | side-by-side HRDs within 25/50/100 pc — the full published Fig. 5 |
+| `plot_kinematics_cmd(input_file, output_dir, ...)` | velocity-sliced HRDs + mean-v_T map (Fig. 7) |
+| `plot_variable_stars_cmd(input_file, output_dir)` | DR2-flagged variables on the HRD (Fig. 15) |
+| `plot_infrared_cmd(input_file, output_dir)` | the 2MASS infrared HRD (Fig. 6) |
+| `plot_sky_map(input_file, output_dir)` | the sample in galactic coordinates — Hyades + scanning-law holes |
 
 ### The query
 
@@ -64,19 +68,28 @@ synchronous queries time out on full-table scans), and returns the query
 string in `metadata["adql"]` so an agent can show its work:
 
 ```sql
-SELECT source_id, parallax, parallax_over_error, phot_g_mean_mag, bp_rp,
-       phot_bp_rp_excess_factor, phot_g_mean_flux_over_error,
-       phot_bp_mean_flux_over_error, phot_rp_mean_flux_over_error,
-       visibility_periods_used, astrometric_chi2_al, astrometric_n_good_obs_al
-FROM gaiadr2.gaia_source
-WHERE parallax >= 10 AND parallax_over_error > 10
+SELECT g.source_id, g.l, g.b, g.parallax, g.parallax_over_error,
+       g.phot_g_mean_mag, g.bp_rp, g.phot_bp_rp_excess_factor,
+       g.phot_g_mean_flux_over_error, g.phot_bp_mean_flux_over_error,
+       g.phot_rp_mean_flux_over_error, g.visibility_periods_used,
+       g.astrometric_chi2_al, g.astrometric_n_good_obs_al,
+       g.pmra, g.pmdec, g.radial_velocity, g.phot_variable_flag,
+       tm.j_m, tm.ks_m
+FROM gaiadr2.gaia_source AS g
+LEFT OUTER JOIN gaiadr2.tmass_best_neighbour AS bn ON g.source_id = bn.source_id
+LEFT OUTER JOIN gaiadr1.tmass_original_valid AS tm ON bn.tmass_oid = tm.tmass_oid
+WHERE g.parallax >= 10 AND g.parallax_over_error > 10
 ```
 
-Note what is **not** there: no `SELECT TOP N` — a truncated result is not a
-random sample (use Gaia's `random_index` column if you ever need one). The
-query returns 439,020 rows (~8 min); `data/gaia_dr2_100pc.csv.gz` is a
-snapshot of exactly this result (fetched August 2026), which is what the
-bundled fallback and the offline tests use.
+The two `LEFT JOIN`s attach 2MASS infrared photometry **server-side** (NaN
+where unmatched); `phot_variable_flag` is recoded at fetch time into a
+numeric 1/0 column named `variable`, so every column in the pipeline stays
+numeric. Note what is **not** there: no `SELECT TOP N` — a truncated result
+is not a random sample (use Gaia's `random_index` column if you ever need
+one). The query returns 439,020 rows (~13 min);
+`data/gaia_dr2_100pc.csv.gz` (~33 MB) is a snapshot of exactly this result
+(fetched August 2026), which is what the bundled fallback and the offline
+tests use.
 
 ### The result
 

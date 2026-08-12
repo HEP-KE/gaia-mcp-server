@@ -13,6 +13,10 @@ from tools import (
     compute_absolute_magnitudes,
     fetch_gaia_sample,
     plot_cmd,
+    plot_infrared_cmd,
+    plot_kinematics_cmd,
+    plot_sky_map,
+    plot_variable_stars_cmd,
 )
 from tools import gaia
 
@@ -20,15 +24,19 @@ from tools import gaia
 def make_sample():
     """One good star, then one row failing exactly one filter each."""
     good = dict(
-        source_id=1, parallax=50.0, parallax_over_error=100.0,
+        source_id=1, l=180.0, b=-22.0, parallax=50.0, parallax_over_error=100.0,
         phot_g_mean_mag=10.0, bp_rp=1.0, phot_bp_rp_excess_factor=1.1,
         phot_g_mean_flux_over_error=100.0, phot_bp_mean_flux_over_error=50.0,
         phot_rp_mean_flux_over_error=50.0, visibility_periods_used=12,
         astrometric_chi2_al=50.0, astrometric_n_good_obs_al=100,
+        pmra=100.0, pmdec=50.0, radial_velocity=np.nan,
+        variable=0.0, j_m=8.5, ks_m=8.0,
     )
     rows = [good]
-    rows.append({**good, "source_id": 2, "phot_g_mean_flux_over_error": 10.0})
-    rows.append({**good, "source_id": 3, "phot_bp_mean_flux_over_error": 5.0})
+    rows.append({**good, "source_id": 2, "phot_g_mean_flux_over_error": 10.0,
+                 "variable": 1.0})
+    rows.append({**good, "source_id": 3, "phot_bp_mean_flux_over_error": 5.0,
+                 "j_m": np.nan, "ks_m": np.nan})
     rows.append({**good, "source_id": 4, "phot_bp_rp_excess_factor": 2.0})
     rows.append({**good, "source_id": 5, "visibility_periods_used": 5})
     data = np.zeros(len(rows), dtype=[(name, "f8") for name in gaia.COLUMNS])
@@ -48,9 +56,12 @@ def sample_csv(tmp_path):
 def test_adql_has_no_top_truncation():
     adql = gaia.build_adql(10.0, 10.0)
     assert "TOP" not in adql.upper()
-    assert "parallax >= 10" in adql
+    assert "g.parallax >= 10" in adql
+    assert "LEFT OUTER JOIN" in adql          # server-side 2MASS cross-match
+    assert "phot_variable_flag" in adql       # becomes the "variable" column
     for column in gaia.COLUMNS:
-        assert column in adql
+        if column != "variable":
+            assert column in adql
 
 
 def test_each_filter_removes_its_bad_row(sample_csv, tmp_path):
@@ -112,6 +123,39 @@ def test_distance_shells_rejects_cmd_table(sample_csv, tmp_path):
     cmd_result = compute_absolute_magnitudes(sample_csv, str(tmp_path))
     with pytest.raises(ValueError, match="parallax column"):
         compare_distance_shells(cmd_result.files[0], str(tmp_path))
+
+
+def test_kinematics_writes_both_figures(sample_csv, tmp_path):
+    result = plot_kinematics_cmd(sample_csv, str(tmp_path))
+    assert len(result.files) == 2
+    assert (tmp_path / "gaia_cmd_velocity_slices.png").exists()
+    assert (tmp_path / "gaia_cmd_mean_vtan.png").exists()
+    # fixture stars: v_T = 4.74047 * hypot(100, 50) / 50 ~ 10.6 km/s -> all slow
+    assert result.metadata["slice_star_counts"] == [5, 0, 0]
+
+
+def test_variable_stars_are_counted(sample_csv, tmp_path):
+    result = plot_variable_stars_cmd(sample_csv, str(tmp_path))
+    assert result.metadata["n_variable"] == 1
+    assert (tmp_path / "gaia_cmd_variables.png").exists()
+
+
+def test_infrared_skips_unmatched(sample_csv, tmp_path):
+    result = plot_infrared_cmd(sample_csv, str(tmp_path))
+    assert result.metadata["n_matched"] == 4  # one fixture row has no 2MASS
+    assert (tmp_path / "gaia_cmd_infrared.png").exists()
+
+
+def test_sky_map_writes_png(sample_csv, tmp_path):
+    result = plot_sky_map(sample_csv, str(tmp_path))
+    assert (tmp_path / "gaia_sky_map.png").stat().st_size > 10_000
+    assert result.metadata["n_stars"] == 5
+
+
+def test_extended_tools_reject_cmd_table(sample_csv, tmp_path):
+    cmd_result = compute_absolute_magnitudes(sample_csv, str(tmp_path))
+    with pytest.raises(ValueError, match="lacks the column"):
+        plot_kinematics_cmd(cmd_result.files[0], str(tmp_path))
 
 
 def test_bundled_fallback_rejects_looser_cuts():

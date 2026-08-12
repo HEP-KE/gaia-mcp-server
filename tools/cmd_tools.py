@@ -36,6 +36,20 @@ def _outdir(output_dir: str) -> Path:
     return path
 
 
+def _require_columns(data, names) -> None:
+    missing = [n for n in names if n not in (data.dtype.names or ())]
+    if missing:
+        raise ValueError(
+            f"input_file lacks the column(s) {missing}; pass the CSV written "
+            "by fetch_gaia_sample or apply_quality_filters (the "
+            "compute_absolute_magnitudes output keeps only bp_rp/abs_g_mag)."
+        )
+
+
+def _abs_g(data) -> "np.ndarray":
+    return data["phot_g_mean_mag"] + 5 * np.log10(data["parallax"]) - 10
+
+
 @validate_call
 def fetch_gaia_sample(
     output_dir: Annotated[str, Field(min_length=1)],
@@ -358,5 +372,260 @@ def compare_distance_shells(
             "star_counts": counts,
             "published_count_100pc": gaia.PUBLISHED_100PC_COUNT,
             "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 5",
+        },
+    )
+
+
+@validate_call
+def plot_kinematics_cmd(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+    slow_max_km_s: Annotated[float, Field(gt=0)] = 40.0,
+    mid_range_km_s: tuple[float, float] = (60.0, 150.0),
+    halo_min_km_s: Annotated[float, Field(gt=0)] = 200.0,
+) -> ArtifactResult:
+    """Slice the HRD by tangential velocity (the paper's Fig. 7).
+
+    Use this tool on the CSV from apply_quality_filters. The tangential
+    velocity v_T = 4.74 * pm[mas/yr] / parallax[mas] km/s needs only Gaia
+    astrometry, and slicing on it separates stellar populations by age and
+    origin: slow stars are the young thin disc (upper main sequence
+    present), fast stars are old (no upper main sequence, subdwarfs sitting
+    blueward of the main sequence, halo white dwarfs). Writes TWO figures:
+    the three velocity-sliced HRDs, and a map of mean v_T across the CMD.
+
+    Args:
+        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+            (needs pmra, pmdec, parallax).
+        output_dir: Directory where the PNGs are written.
+        slow_max_km_s: Upper v_T bound of the "thin disc" panel.
+        mid_range_km_s: (low, high) v_T bounds of the middle panel.
+        halo_min_km_s: Lower v_T bound of the "halo" panel.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    data = gaia.load_sample_csv(input_file)
+    _require_columns(data, ["pmra", "pmdec", "parallax", "phot_g_mean_mag", "bp_rp"])
+    abs_g, color = _abs_g(data), data["bp_rp"]
+    v_tan = 4.74047 * np.hypot(data["pmra"], data["pmdec"]) / data["parallax"]
+
+    mid_lo, mid_hi = mid_range_km_s
+    slices = [
+        (f"$v_T$ < {slow_max_km_s:g} km/s — mostly thin disc", v_tan < slow_max_km_s),
+        (f"{mid_lo:g} < $v_T$ < {mid_hi:g} km/s — older discs",
+         (v_tan > mid_lo) & (v_tan < mid_hi)),
+        (f"$v_T$ > {halo_min_km_s:g} km/s — halo", v_tan > halo_min_km_s),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(14, 6), sharex=True, sharey=True)
+    counts = {}
+    for ax, (title, sel) in zip(axes, slices):
+        ax.hist2d(color[sel], abs_g[sel], bins=200, range=[[-1, 5], [-5, 17]],
+                  norm=LogNorm(), cmap="viridis", cmin=1)
+        ax.set_ylim(17, -5)
+        ax.set_xlabel(r"$G_{BP} - G_{RP}$")
+        ax.set_title(f"{title}\n{int(sel.sum()):,} stars")
+        counts[title.split("$")[0].strip() or title] = int(sel.sum())
+    axes[0].set_ylabel(r"$M_G$")
+    slices_path = _outdir(output_dir) / "gaia_cmd_velocity_slices.png"
+    fig.savefig(slices_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    H_n, xe, ye = np.histogram2d(color, abs_g, bins=200, range=[[-1, 5], [-5, 17]])
+    H_v, _, _ = np.histogram2d(color, abs_g, bins=200, range=[[-1, 5], [-5, 17]],
+                               weights=np.nan_to_num(v_tan))
+    mean_v = np.where(H_n >= 3, H_v / np.maximum(H_n, 1), np.nan)
+    fig, ax = plt.subplots(figsize=(6.8, 7))
+    im = ax.pcolormesh(xe, ye, mean_v.T, cmap="magma", vmin=10, vmax=100)
+    ax.set_ylim(17, -5)
+    ax.set_xlabel(r"$G_{BP} - G_{RP}$")
+    ax.set_ylabel(r"$M_G$")
+    ax.set_title("Mean tangential velocity across the HRD")
+    fig.colorbar(im, ax=ax, label=r"mean $v_T$ [km/s] (bins with $\geq$ 3 stars)")
+    map_path = _outdir(output_dir) / "gaia_cmd_mean_vtan.png"
+    fig.savefig(map_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    slice_counts = [int(sel.sum()) for _, sel in slices]
+    return ArtifactResult(
+        status="success",
+        files=[str(slices_path), str(map_path)],
+        message=(
+            f"Velocity-sliced HRDs: {slice_counts[0]:,} slow / "
+            f"{slice_counts[1]:,} intermediate / {slice_counts[2]:,} halo "
+            "stars, plus the mean-v_T map."
+        ),
+        metadata={
+            "v_tan_slices_km_s": {"slow_max": slow_max_km_s,
+                                  "mid": list(mid_range_km_s),
+                                  "halo_min": halo_min_km_s},
+            "slice_star_counts": slice_counts,
+            "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 7",
+        },
+    )
+
+
+@validate_call
+def plot_variable_stars_cmd(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+) -> ArtifactResult:
+    """Highlight DR2's flagged variable stars on the HRD (the paper's Fig. 15).
+
+    Use this tool on the CSV from apply_quality_filters. Within 100 pc the
+    flagged variables are almost entirely flaring and spotted M dwarfs on
+    the lower main sequence; the bright pulsators that fill this figure in
+    the all-sky sample (Cepheids, RR Lyrae) have no representatives this
+    close to the Sun.
+
+    Args:
+        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+            (needs the "variable" 0/1 column).
+        output_dir: Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    data = gaia.load_sample_csv(input_file)
+    _require_columns(data, ["variable", "parallax", "phot_g_mean_mag", "bp_rp"])
+    abs_g, color = _abs_g(data), data["bp_rp"]
+    variable = data["variable"] > 0.5
+
+    fig, ax = plt.subplots(figsize=(6.8, 7))
+    ax.hist2d(color, abs_g, bins=300, range=[[-1, 5], [-5, 17]],
+              norm=LogNorm(), cmap="Greys", cmin=1)
+    ax.scatter(color[variable], abs_g[variable], s=8, color="C3",
+               label=f"flagged VARIABLE — {int(variable.sum()):,} stars")
+    ax.set_ylim(17, -5)
+    ax.set_xlabel(r"$G_{BP} - G_{RP}$")
+    ax.set_ylabel(r"$M_G$")
+    ax.legend(loc="upper right")
+
+    plot_path = _outdir(output_dir) / "gaia_cmd_variables.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return ArtifactResult(
+        status="success",
+        files=[str(plot_path)],
+        message=(
+            f"Marked {int(variable.sum()):,} flagged variables on the HRD "
+            f"of {len(data):,} stars."
+        ),
+        metadata={
+            "n_variable": int(variable.sum()),
+            "n_total": len(data),
+            "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 15",
+        },
+    )
+
+
+@validate_call
+def plot_infrared_cmd(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+) -> ArtifactResult:
+    """Draw the infrared HRD from the 2MASS cross-match (the paper's Fig. 6).
+
+    Use this tool on the CSV from apply_quality_filters. The sample carries
+    2MASS J and Ks from a server-side cross-match (NaN where unmatched). In
+    the infrared the main sequence is less sensitive to metallicity and the
+    M dwarfs bunch up; white dwarfs are largely too faint for 2MASS and
+    drop out — a photometric completeness lesson in one panel.
+
+    Args:
+        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+            (needs j_m, ks_m).
+        output_dir: Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    data = gaia.load_sample_csv(input_file)
+    _require_columns(data, ["j_m", "ks_m", "parallax"])
+    matched = np.isfinite(data["j_m"]) & np.isfinite(data["ks_m"])
+    subset = data[matched]
+    abs_ks = subset["ks_m"] + 5 * np.log10(subset["parallax"]) - 10
+    j_ks = subset["j_m"] - subset["ks_m"]
+
+    fig, ax = plt.subplots(figsize=(6.8, 7))
+    h = ax.hist2d(j_ks, abs_ks, bins=250, range=[[-0.4, 1.4], [-6, 11]],
+                  norm=LogNorm(), cmap="viridis", cmin=1)
+    ax.set_ylim(11, -6)
+    ax.set_xlabel(r"$J - K_s$")
+    ax.set_ylabel(r"$M_{K_s}$")
+    ax.set_title(f"2MASS HRD — {int(matched.sum()):,} of {len(data):,} stars matched")
+    fig.colorbar(h[3], ax=ax, label="stars per bin")
+
+    plot_path = _outdir(output_dir) / "gaia_cmd_infrared.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return ArtifactResult(
+        status="success",
+        files=[str(plot_path)],
+        message=(
+            f"Infrared HRD of {int(matched.sum()):,} 2MASS-matched stars "
+            f"(of {len(data):,})."
+        ),
+        metadata={
+            "n_matched": int(matched.sum()),
+            "n_total": len(data),
+            "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 6",
+        },
+    )
+
+
+@validate_call
+def plot_sky_map(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+) -> ArtifactResult:
+    """Map the sample on the sky in galactic coordinates.
+
+    Use this tool on the CSV from apply_quality_filters. Within 100 pc the
+    sky should be nearly isotropic — and almost is: the overdensity at
+    l = 180, b = -22 is the Hyades, the nearest open cluster (d = 47 pc),
+    and the stark empty patches are regions Gaia's scanning law had visited
+    too few times by DR2, emptied entirely by the visibility_periods_used
+    cut. Quality filters imprint the survey's geometry on the sample.
+
+    Args:
+        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+            (needs l, b).
+        output_dir: Directory where the PNG is written.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    data = gaia.load_sample_csv(input_file)
+    _require_columns(data, ["l", "b"])
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    h = ax.hist2d(data["l"], data["b"], bins=[360, 180],
+                  range=[[0, 360], [-90, 90]], norm=LogNorm(), cmap="viridis")
+    ax.set_xlabel("galactic longitude $l$ [deg]")
+    ax.set_ylabel("galactic latitude $b$ [deg]")
+    ax.set_title(f"{len(data):,} stars on the sky")
+    ax.annotate("Hyades", (180, -22), xytext=(230, -55), color="white",
+                arrowprops=dict(arrowstyle="->", color="white"))
+    fig.colorbar(h[3], ax=ax, label="stars per deg$^2$ bin")
+
+    plot_path = _outdir(output_dir) / "gaia_sky_map.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return ArtifactResult(
+        status="success",
+        files=[str(plot_path)],
+        message=f"Sky map of {len(data):,} stars in galactic coordinates.",
+        metadata={
+            "n_stars": len(data),
+            "landmarks": {"Hyades": {"l_deg": 180, "b_deg": -22, "d_pc": 47}},
         },
     )
