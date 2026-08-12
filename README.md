@@ -142,3 +142,12 @@ holding the port and clears it automatically).
 query, the quality cuts one at a time (with star counts), the HRD, the same
 steps as tools, then the server. Committed outputs let you read it without
 running anything.
+
+Its **appendix** goes further with
+[`jobovy/gaia_tools`](https://github.com/jobovy/gaia_tools) (archived
+January 2025, still works; `pip install
+git+https://github.com/jobovy/gaia_tools`): one cached extended query adds
+kinematics, the variability flag, and a server-side 2MASS cross-match, and
+from it the velocity-sliced HRDs of the paper's Fig. 7, the mean-$v_T$ map,
+the variable stars of Fig. 15, the infrared HRD of Fig. 6, and the 100 pc
+sky map with the Hyades standing out.
