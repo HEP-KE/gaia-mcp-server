@@ -7,6 +7,7 @@ here and extend __all__ to expose new tools — nothing else changes.
 from .cmd_tools import (
     ArtifactResult,
     apply_quality_filters,
+    compare_distance_shells,
     compute_absolute_magnitudes,
     fetch_gaia_sample,
     plot_cmd,
@@ -17,4 +18,5 @@ __all__ = [
     "apply_quality_filters",
     "compute_absolute_magnitudes",
     "plot_cmd",
+    "compare_distance_shells",
 ]

@@ -54,6 +54,7 @@ tests/test_tools.py               tools tested as plain Python, no MCP or networ
 | `apply_quality_filters(input_file, output_dir, ...)` | the Babusiaux+ 2018 photometric + astrometric cuts, with per-filter counts and justifications |
 | `compute_absolute_magnitudes(input_file, output_dir)` | M_G = G + 5 log₁₀(ϖ/mas) − 10 |
 | `plot_cmd(input_file, output_dir, ...)` | log-density HRD, axes matched to the published Fig. 5c |
+| `compare_distance_shells(input_file, output_dir, ...)` | side-by-side HRDs within 25/50/100 pc — the full published Fig. 5 |
 
 Two conventions worth copying into any science MCP server:
 

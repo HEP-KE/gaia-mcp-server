@@ -284,3 +284,79 @@ def plot_cmd(
             "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 5c",
         },
     )
+
+
+@validate_call
+def compare_distance_shells(
+    input_file: Annotated[str, Field(min_length=1)],
+    output_dir: Annotated[str, Field(min_length=1)],
+    distances_pc: Annotated[list[float], Field(min_length=2, max_length=4)] = [25.0, 50.0, 100.0],
+) -> ArtifactResult:
+    """Draw side-by-side HRDs for nested distance shells (full Fig. 5).
+
+    Use this tool on the CSV written by apply_quality_filters (it needs the
+    parallax column, so NOT the compute_absolute_magnitudes output). The
+    default distances reproduce the three panels of Babusiaux et al. (2018)
+    Fig. 5: stars within 25, 50, and 100 pc. Nearby shells contain far fewer
+    stars but reach fainter absolute magnitudes — the sample is
+    volume-limited in parallax yet magnitude-limited in G, so the faint end
+    of the diagram is only complete close to the Sun.
+
+    Args:
+        input_file: CSV written by apply_quality_filters (or
+            fetch_gaia_sample) — must still contain the parallax column.
+        output_dir: Directory where the PNG is written.
+        distances_pc: Shell radii in parsec, small to large. A star is in a
+            shell when parallax >= 1000/distance.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+
+    data = gaia.load_sample_csv(input_file)
+    if "parallax" not in (data.dtype.names or ()):
+        raise ValueError(
+            "input_file has no parallax column; pass the CSV from "
+            "apply_quality_filters, not from compute_absolute_magnitudes."
+        )
+    distances = sorted(distances_pc)
+
+    fig, axes = plt.subplots(1, len(distances),
+                             figsize=(4.6 * len(distances), 6.2),
+                             sharex=True, sharey=True)
+    counts = {}
+    for ax, d_pc in zip(np.atleast_1d(axes), distances):
+        shell = data[(data["parallax"] >= 1000.0 / d_pc)
+                     & ~np.isnan(data["bp_rp"])]
+        abs_g = shell["phot_g_mean_mag"] + 5 * np.log10(shell["parallax"]) - 10
+        ax.hist2d(shell["bp_rp"], abs_g, bins=250,
+                  range=[[-1, 5], [-5, 17]], norm=LogNorm(),
+                  cmap="viridis", cmin=1)
+        ax.set_xlim(-1, 5)
+        ax.set_ylim(17, -5)
+        ax.set_xlabel(r"$G_{BP} - G_{RP}$")
+        ax.set_title(f"d < {d_pc:g} pc — {len(shell):,} stars")
+        counts[f"{d_pc:g}_pc"] = len(shell)
+    np.atleast_1d(axes)[0].set_ylabel(r"$M_G$")
+    fig.suptitle("Gaia DR2 HRD by distance shell", y=0.99)
+
+    plot_path = _outdir(output_dir) / "gaia_cmd_shells.png"
+    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    return ArtifactResult(
+        status="success",
+        files=[str(plot_path)],
+        message=(
+            "Plotted HRDs for "
+            + ", ".join(f"d < {d:g} pc ({counts[f'{d:g}_pc']:,} stars)"
+                        for d in distances)
+            + "."
+        ),
+        metadata={
+            "star_counts": counts,
+            "published_count_100pc": gaia.PUBLISHED_100PC_COUNT,
+            "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 5",
+        },
+    )

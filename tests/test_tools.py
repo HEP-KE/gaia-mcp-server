@@ -9,6 +9,7 @@ import pytest
 
 from tools import (
     apply_quality_filters,
+    compare_distance_shells,
     compute_absolute_magnitudes,
     fetch_gaia_sample,
     plot_cmd,
@@ -96,6 +97,21 @@ def test_plot_cmd_writes_png(sample_csv, tmp_path):
     assert png.endswith("gaia_cmd_hrd.png")
     assert (tmp_path / "gaia_cmd_hrd.png").stat().st_size > 10_000
     assert plot_result.metadata["published_count_fig5c"] == 212_728
+
+
+def test_distance_shells_counts_are_nested(sample_csv, tmp_path):
+    # fixture stars all have parallax = 50 mas (d = 20 pc): inside every shell
+    result = compare_distance_shells(sample_csv, str(tmp_path),
+                                     distances_pc=[25.0, 100.0])
+    counts = result.metadata["star_counts"]
+    assert counts["25_pc"] == counts["100_pc"] == 5
+    assert (tmp_path / "gaia_cmd_shells.png").stat().st_size > 10_000
+
+
+def test_distance_shells_rejects_cmd_table(sample_csv, tmp_path):
+    cmd_result = compute_absolute_magnitudes(sample_csv, str(tmp_path))
+    with pytest.raises(ValueError, match="parallax column"):
+        compare_distance_shells(cmd_result.files[0], str(tmp_path))
 
 
 def test_bundled_fallback_rejects_looser_cuts():
