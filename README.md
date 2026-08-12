@@ -56,6 +56,39 @@ tests/test_tools.py               tools tested as plain Python, no MCP or networ
 | `plot_cmd(input_file, output_dir, ...)` | log-density HRD, axes matched to the published Fig. 5c |
 | `compare_distance_shells(input_file, output_dir, ...)` | side-by-side HRDs within 25/50/100 pc — the full published Fig. 5 |
 
+### The query
+
+`fetch_gaia_sample` runs exactly this ADQL against the
+[ESA Gaia archive](https://gea.esac.esa.int/archive/) (asynchronous job —
+synchronous queries time out on full-table scans), and returns the query
+string in `metadata["adql"]` so an agent can show its work:
+
+```sql
+SELECT source_id, parallax, parallax_over_error, phot_g_mean_mag, bp_rp,
+       phot_bp_rp_excess_factor, phot_g_mean_flux_over_error,
+       phot_bp_mean_flux_over_error, phot_rp_mean_flux_over_error,
+       visibility_periods_used, astrometric_chi2_al, astrometric_n_good_obs_al
+FROM gaiadr2.gaia_source
+WHERE parallax >= 10 AND parallax_over_error > 10
+```
+
+Note what is **not** there: no `SELECT TOP N` — a truncated result is not a
+random sample (use Gaia's `random_index` column if you ever need one). The
+query returns 439,020 rows (~8 min); `data/gaia_dr2_100pc.csv.gz` is a
+snapshot of exactly this result (fetched August 2026), which is what the
+bundled fallback and the offline tests use.
+
+### The result
+
+The pipeline output with the default (paper) settings — **212,728 stars**,
+matching the published Fig. 5c count exactly:
+
+![Gaia DR2 HRD, d < 100 pc](notebooks/output/gaia_cmd_hrd.png)
+
+And `compare_distance_shells`, reproducing the full Fig. 5:
+
+![HRD by distance shell](notebooks/output/gaia_cmd_shells.png)
+
 Two conventions worth copying into any science MCP server:
 
 1. Every tool returns `{status, files, message, metadata}` (`ArtifactResult`).
