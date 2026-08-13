@@ -144,13 +144,20 @@ running from the repo root makes the local packages win.
 **Streamable HTTP** — the server is a visible process with a URL:
 
 ```bash
-python -m mcp_server --transport streamable-http --port 8000
+python -m mcp_server --transport streamable-http --port 8001
 ```
 
-Clients connect to `http://127.0.0.1:8000/mcp`. Stop the server with
+Clients connect to `http://127.0.0.1:8001/mcp`. Port 8001 by convention, so
+this server can run **alongside** `spectra-mcp-server` on 8000 — one agent
+can then use both (see `docs/mcp-clients.md`, and notebook
+`05_multi_server.ipynb` in the client repo). Stop the server with
 **Ctrl+C** (Ctrl+Z only suspends it, leaving the port taken — if that
 happens, just start the server again: it detects a leftover `mcp_server`
 holding the port and clears it automatically).
+
+To use this server from Claude Code, the Claude desktop app, Codex, Cursor,
+or any other MCP client, see [`docs/mcp-clients.md`](docs/mcp-clients.md) —
+a checked-in `.mcp.json` already wires it into Claude Code.
 
 ## Start with the notebook
 

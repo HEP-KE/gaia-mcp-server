@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gaia": {
+      "command": "python",
+      "args": ["-m", "mcp_server", "--transport", "stdio"]
+    }
+  }
+}
