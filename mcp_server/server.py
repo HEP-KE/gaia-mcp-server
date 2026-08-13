@@ -1,9 +1,11 @@
 import importlib
+import os
 from pathlib import Path
 import tomllib
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 Transport = Literal["stdio", "streamable-http"]
 
@@ -40,16 +42,28 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 8000,
 ) -> FastMCP:
+    # By default the HTTP transport only accepts requests whose Host header is
+    # localhost (DNS-rebinding protection) — remote clients get 421. Setting
+    # MCP_PUBLIC=1 turns that check off for serving through a tunnel or a
+    # cloud host. Only do this behind a private URL or with auth in front.
+    transport_security = None
+    if os.environ.get("MCP_PUBLIC"):
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False
+        )
+
     mcp = FastMCP(
-        "Spectra MCP Server",
+        "Gaia MCP Server",
         instructions=(
-            "Cosmology tools: compute linear matter power spectra with CLASS and "
-            "compare them to eBOSS DR14 Lyman-alpha data. Tools that write files "
-            "accept an output_dir argument and return structured artifact metadata; "
-            "pass file paths between tools, never raw arrays."
+            "Gaia DR2 colour-magnitude diagram tools: fetch the 100 pc solar "
+            "neighbourhood sample, apply the published quality filters, and draw "
+            "the Hertzsprung-Russell diagram and related figures. Tools that write "
+            "files accept an output_dir argument and return structured artifact "
+            "metadata; pass file paths between tools, never raw arrays."
         ),
         host=host,
         port=port,
+        transport_security=transport_security,
     )
 
     for tool_module in load_tool_modules():
