@@ -103,6 +103,20 @@ def query_archive(min_parallax_mas: float, min_parallax_snr: float) -> "np.ndarr
     return table_to_array(job.get_results())
 
 
+def fetch_sample_to_csv(
+    min_parallax_mas: float, min_parallax_snr: float, filename: str = "gaia_sample.csv"
+) -> dict:
+    """Query the live archive and write the sample CSV into the CWD.
+
+    The HPC-dispatch kernel behind fetch_gaia_sample: on a compute node the
+    CWD is the job directory, and the CSV comes back to the client as a job
+    artifact. Returns only JSON-safe counts — never the table itself.
+    """
+    data = query_archive(min_parallax_mas, min_parallax_snr)
+    write_sample_csv(data, Path(filename))
+    return {"n_rows": int(len(data)), "file": filename}
+
+
 def load_bundled(min_parallax_mas: float, min_parallax_snr: float) -> "np.ndarray":
     """Load the bundled snapshot and re-apply the requested cuts.
 

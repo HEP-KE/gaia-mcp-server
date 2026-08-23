@@ -74,7 +74,51 @@ def fetch_gaia_sample(
         source: "archive" queries the ESA Gaia archive live (needs network,
             ~1-2 min); "bundled" uses the snapshot shipped in data/;
             "auto" tries the archive and falls back to the snapshot.
+
+    When dispatch is set to an HPC site (set_dispatch tool), the archive
+    query runs on a facility compute node and the CSV is fetched back here;
+    source="bundled" always runs locally (the snapshot does not ship).
     """
+    from mcp_server.dispatch import remote_site, run_kernel  # lazy: server-only
+
+    site = remote_site()
+    if site and source != "bundled":
+        result = run_kernel(
+            "gaia.fetch_sample_to_csv",
+            {"min_parallax_mas": min_parallax_mas, "min_parallax_snr": min_parallax_snr},
+            pip_deps=["astroquery"],
+            duration=900,
+        )
+        fetched = [f for f in result.get("artifact_files", [])
+                   if f.endswith("gaia_sample.csv")]
+        if not fetched:
+            raise RuntimeError(
+                f"The {site} job succeeded ({result['result'].get('n_rows', '?')} rows) "
+                "but the sample CSV did not come back as an artifact — check "
+                "DISPATCH_ARTIFACT_DIR and Globus Connect Personal, then rerun."
+            )
+        import shutil
+
+        csv_path = _outdir(output_dir) / "gaia_sample.csv"
+        shutil.move(fetched[0], csv_path)
+        n_rows = int(result["result"]["n_rows"])
+        return ArtifactResult(
+            status="success",
+            files=[str(csv_path)],
+            message=(
+                f"Fetched {n_rows:,} Gaia DR2 sources with parallax >= "
+                f"{min_parallax_mas:g} mas and parallax SNR > {min_parallax_snr:g} "
+                f"from the archive, computed on {result.get('host', site)}."
+            ),
+            metadata={
+                "n_rows": n_rows,
+                "source": "archive",
+                "computed_on": result.get("host", site),
+                "adql": gaia.build_adql(min_parallax_mas, min_parallax_snr),
+                "columns": list(gaia.COLUMNS),
+            },
+        )
+
     used, note = source, ""
     if source == "archive":
         data = gaia.query_archive(min_parallax_mas, min_parallax_snr)

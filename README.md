@@ -198,3 +198,22 @@ kinematics, the variability flag, and a server-side 2MASS cross-match, and
 from it the velocity-sliced HRDs of the paper's Fig. 7, the mean-$v_T$ map,
 the variable stars of Fig. 15, the infrared HRD of Fig. 6, and the 100 pc
 sky map with the Hyades standing out.
+
+## Run on HPC (optional)
+
+The server can execute its compute-heavy tools on DOE facilities through the
+[hep-genesis](https://github.com/HEP-KE/hep-genesis-agent) dispatch engine.
+Local execution is the default and needs none of this.
+
+```bash
+pip install -e <hep-genesis-agent>/backend[iri]   # into this server's env
+```
+
+Then, in a session: `set_dispatch("polaris")` (or `"perlmutter"`) routes
+`fetch_gaia_sample` (archive mode) to a facility compute node — the `tools/`
+package is staged per job, the archive query runs there, and the sample CSV
+is fetched back locally, so every downstream tool works unchanged.
+`get_dispatch` reports the site; `auth_status` reports facility sign-in
+(done via the hep-genesis auth CLIs or desktop app, plus Globus Connect
+Personal running locally). `set_dispatch("local")` switches back;
+`source="bundled"` always runs locally.
