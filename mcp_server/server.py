@@ -97,11 +97,16 @@ def create_server(
         )
 
     instructions = (
-        "Gaia DR2 colour-magnitude diagram tools: fetch the 100 pc solar "
-        "neighbourhood sample, apply the published quality filters, and draw "
-        "the Hertzsprung-Russell diagram and related figures. Tools that write "
-        "files accept an output_dir argument and return structured artifact "
-        "metadata; pass file paths between tools, never raw arrays."
+        "Gaia DR2 stellar colour-magnitude tools: MEASURED astrometry and "
+        "photometry of nearby stars from the ESA Gaia archive (not simulation "
+        "or emulator output). Pipeline: fetch_gaia_sample (default 100 pc; "
+        "min_parallax_mas = 1000/radius_pc, e.g. 100 -> 10 pc) -> "
+        "apply_gaia_quality_filters -> compute_gaia_absolute_magnitudes -> "
+        "plot_gaia_cmd; the other plot tools (distance shells, kinematics, "
+        "variables, infrared, sky map, Hyades, white dwarfs, luminosity "
+        "function) take the filtered CSV. Tools that write files accept an "
+        "output_dir argument and return structured artifact metadata; pass "
+        "file paths between tools, never raw arrays."
     )
     if OUTPUT_ROOT:
         instructions += (

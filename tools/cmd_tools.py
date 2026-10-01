@@ -3,9 +3,11 @@
 Plain Python functions — no MCP imports. The type hints, Field constraints,
 and docstrings below become the MCP tool schema that agents see.
 
-Data flows between tools as CSV file paths: fetch_gaia_sample writes the raw
-sample, apply_quality_filters cleans it, compute_absolute_magnitudes turns it
-into a CMD table, plot_cmd draws it. Only small numbers (row counts, file
+These are MEASUREMENTS from the Gaia DR2 catalogue (ESA archive), not
+simulation or emulator output. Data flows between tools as CSV file paths:
+fetch_gaia_sample writes the raw sample, apply_gaia_quality_filters cleans
+it, compute_gaia_absolute_magnitudes turns it into a CMD table,
+plot_gaia_cmd draws it. Only small numbers (row counts, file
 paths) ever pass through the LLM context.
 
 Target figure: Gaia Collaboration, Babusiaux et al. (2018), A&A 616, A10,
@@ -19,6 +21,20 @@ import numpy as np
 from pydantic import BaseModel, Field, validate_call
 
 from . import gaia
+from .plotting import (ABS_G, BP_RP, FIELD_GREY, MUTED, PALETTE, density,
+                       empty_note, sample_radius_pc, save, shared_norm, style,
+                       use_density, wrap)
+
+SAVE_PDF = Field(description="Also write a vector PDF next to the PNG (for manuscripts).")
+
+
+def _radius_text(radius_pc) -> str:
+    return f"d < {radius_pc:g} pc" if radius_pc else "Gaia DR2 sample"
+
+
+def _is_published_sample(radius_pc) -> bool:
+    """The Babusiaux et al. Fig. 5c count only applies to the 100 pc sample."""
+    return radius_pc is not None and 99.0 <= radius_pc <= 101.0
 
 
 class ArtifactResult(BaseModel):
@@ -36,13 +52,23 @@ def _outdir(output_dir: str) -> Path:
     return path
 
 
+def _artifact(output_dir: str, base: str, suffix: str, **inputs) -> Path:
+    """<base>_<hash of inputs><suffix>: calls with different samples or cuts
+    in one output_dir get different files instead of overwriting each other;
+    identical calls reuse the same name."""
+    import hashlib
+    blob = ",".join(f"{k}={inputs[k]}" for k in sorted(inputs))
+    return _outdir(output_dir) / f"{base}_{hashlib.sha1(blob.encode()).hexdigest()[:6]}{suffix}"
+
+
 def _require_columns(data, names) -> None:
     missing = [n for n in names if n not in (data.dtype.names or ())]
     if missing:
         raise ValueError(
             f"input_file lacks the column(s) {missing}; pass the CSV written "
-            "by fetch_gaia_sample or apply_quality_filters (the "
-            "compute_absolute_magnitudes output keeps only bp_rp/abs_g_mag)."
+            "by fetch_gaia_sample or apply_gaia_quality_filters (the "
+            "compute_gaia_absolute_magnitudes output keeps only bp_rp, "
+            "abs_g_mag and parallax)."
         )
 
 
@@ -53,11 +79,12 @@ def _abs_g(data) -> "np.ndarray":
 @validate_call
 def fetch_gaia_sample(
     output_dir: Annotated[str, Field(min_length=1)],
-    min_parallax_mas: Annotated[float, Field(ge=1.0, le=100.0)] = 10.0,
+    min_parallax_mas: Annotated[float, Field(ge=1.0, le=1000.0, description="Parallax floor in mas = 1000 / (sample radius in pc): 10 -> 100 pc (default, the published sample), 100 -> 10 pc, 200 -> 5 pc. The nearest star (Proxima Cen) is 768 mas.")] = 10.0,
     min_parallax_snr: Annotated[float, Field(ge=0.0, le=100.0)] = 10.0,
     source: Literal["auto", "archive", "bundled"] = "auto",
 ) -> ArtifactResult:
-    """Fetch the Gaia DR2 solar-neighbourhood sample and write it to a CSV.
+    """Fetch a Gaia DR2 solar-neighbourhood star sample (measured astrometry
+    and photometry from the ESA archive) and write it to a CSV.
 
     Use this tool first. The default cuts select the 100 pc sample of
     Babusiaux et al. (2018) Fig. 5c: parallax >= 10 mas (distance < 100 pc)
@@ -67,7 +94,10 @@ def fetch_gaia_sample(
 
     Args:
         output_dir: Directory where the CSV is written.
-        min_parallax_mas: Parallax floor in mas; 10 mas = a 100 pc sphere.
+        min_parallax_mas: Parallax floor in mas; 10 mas = a 100 pc sphere,
+            100 mas = 10 pc, 200 mas = 5 pc. DR2 contains many spurious
+            high-parallax sources, so small nearby samples shrink a lot under
+            apply_gaia_quality_filters — that is expected.
         min_parallax_snr: Minimum parallax/parallax_error. Raising it gives
             better distances but preferentially removes faint red stars —
             a biased, not just smaller, sample.
@@ -99,7 +129,7 @@ def fetch_gaia_sample(
             )
         import shutil
 
-        csv_path = _outdir(output_dir) / "gaia_sample.csv"
+        csv_path = _artifact(output_dir, "gaia_sample", ".csv", plx=min_parallax_mas, snr=min_parallax_snr, source=source)
         shutil.move(fetched[0], csv_path)
         n_rows = int(result["result"]["n_rows"])
         return ArtifactResult(
@@ -133,7 +163,7 @@ def fetch_gaia_sample(
             used = "bundled"
             note = f" (archive unavailable: {type(exc).__name__}; used bundled snapshot)"
 
-    csv_path = _outdir(output_dir) / "gaia_sample.csv"
+    csv_path = _artifact(output_dir, "gaia_sample", ".csv", plx=min_parallax_mas, snr=min_parallax_snr, source=source)
     gaia.write_sample_csv(data, csv_path)
     return ArtifactResult(
         status="success",
@@ -141,7 +171,7 @@ def fetch_gaia_sample(
         message=(
             f"Fetched {len(data):,} Gaia DR2 sources with parallax >= "
             f"{min_parallax_mas:g} mas and parallax SNR > {min_parallax_snr:g} "
-            f"from the {used}{note}."
+            f"from the {'archive' if used == 'archive' else 'bundled snapshot'}{note}."
         ),
         metadata={
             "n_rows": len(data),
@@ -153,7 +183,7 @@ def fetch_gaia_sample(
 
 
 @validate_call
-def apply_quality_filters(
+def apply_gaia_quality_filters(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
     min_phot_g_snr: Annotated[float, Field(ge=0.0)] = 50.0,
@@ -161,7 +191,10 @@ def apply_quality_filters(
     apply_excess_factor_cut: bool = True,
     apply_astrometry_cut: bool = True,
 ) -> ArtifactResult:
-    """Apply the Babusiaux et al. (2018) quality filters to a Gaia sample CSV.
+    """Apply the Babusiaux et al. (2018) Gaia DR2 quality cuts to a star sample CSV.
+
+    Gaia-specific photometric/astrometric cuts (flux SNR, BP/RP excess
+    factor, unit-weight error) — not a generic data filter.
 
     Use this tool after fetch_gaia_sample. The defaults reproduce the
     published selection (their Sect. 2.1); with them, the 100 pc sample
@@ -197,43 +230,46 @@ def apply_quality_filters(
         removed_alone[name] = int(n_input - mask.sum())
         combined &= mask
     clean = data[combined]
+    radius = sample_radius_pc(data["parallax"]) if "parallax" in data.dtype.names else None
 
-    csv_path = _outdir(output_dir) / "gaia_sample_clean.csv"
+    csv_path = _artifact(output_dir, "gaia_sample_clean", ".csv", f=input_file, g=min_phot_g_snr, bprp=min_phot_bprp_snr, excess=apply_excess_factor_cut, astrometry=apply_astrometry_cut)
     gaia.write_sample_csv(clean, csv_path)
-    return ArtifactResult(
-        status="success",
-        files=[str(csv_path)],
-        message=(
-            f"Quality filters kept {len(clean):,} of {n_input:,} stars "
-            f"(published 100 pc count: {gaia.PUBLISHED_100PC_COUNT:,})."
-        ),
-        metadata={
-            "n_input": n_input,
-            "n_output": len(clean),
-            "removed_by_each_filter_alone": removed_alone,
-            "justifications": {k: gaia.JUSTIFICATIONS[k] for k in masks},
-            "published_count_fig5c": gaia.PUBLISHED_100PC_COUNT,
-        },
-    )
+    message = f"Quality filters kept {len(clean):,} of {n_input:,} stars"
+    if _is_published_sample(radius):
+        message += f" (published 100 pc count: {gaia.PUBLISHED_100PC_COUNT:,})."
+    else:
+        message += (f" ({_radius_text(radius)}; the published 212,728 count "
+                    "applies only to the default 100 pc sample).")
+    metadata = {
+        "n_input": n_input,
+        "n_output": len(clean),
+        "sample_radius_pc": radius,
+        "removed_by_each_filter_alone": removed_alone,
+        "justifications": {k: gaia.JUSTIFICATIONS[k] for k in masks},
+    }
+    if _is_published_sample(radius):
+        metadata["published_count_fig5c"] = gaia.PUBLISHED_100PC_COUNT
+    return ArtifactResult(status="success", files=[str(csv_path)],
+                          message=message, metadata=metadata)
 
 
 @validate_call
-def compute_absolute_magnitudes(
+def compute_gaia_absolute_magnitudes(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
 ) -> ArtifactResult:
     """Convert apparent G magnitudes to absolute using inverted parallaxes.
 
-    Use this tool after apply_quality_filters. It computes
-    M_G = G + 5 log10(parallax/mas) - 10 and writes a CMD table (columns:
-    bp_rp, abs_g_mag). Inverting the parallax is only a safe distance
+    Use this tool after apply_gaia_quality_filters. It computes
+    M_G = G + 5 log10(parallax/mas) - 10 for Gaia DR2 stars and writes a
+    CMD table (columns: bp_rp, abs_g_mag, parallax). Inverting the parallax is only a safe distance
     estimator because this sample requires parallax SNR > 10: for noisy or
     negative parallaxes 1/parallax is biased or meaningless, and one should
     infer distances properly (e.g. Bailer-Jones et al. 2018). No extinction
     correction is applied — within 100 pc it is negligible.
 
     Args:
-        input_file: CSV written by apply_quality_filters (or fetch_gaia_sample).
+        input_file: CSV written by apply_gaia_quality_filters (or fetch_gaia_sample).
         output_dir: Directory where the CMD CSV is written.
     """
     data = gaia.load_sample_csv(input_file)
@@ -244,12 +280,12 @@ def compute_absolute_magnitudes(
 
     abs_g = data["phot_g_mean_mag"] + 5 * np.log10(data["parallax"]) - 10
 
-    csv_path = _outdir(output_dir) / "gaia_cmd.csv"
+    csv_path = _artifact(output_dir, "gaia_cmd", ".csv", f=input_file)
     np.savetxt(
         csv_path,
-        np.column_stack([data["bp_rp"], abs_g]),
+        np.column_stack([data["bp_rp"], abs_g, data["parallax"]]),
         delimiter=",",
-        header="bp_rp,abs_g_mag",
+        header="bp_rp,abs_g_mag,parallax",
         comments="",
         fmt="%.6f",
     )
@@ -271,8 +307,10 @@ def compute_absolute_magnitudes(
     )
 
 
+
+
 @validate_call
-def plot_cmd(
+def plot_gaia_cmd(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
     color_min: float = -1.0,
@@ -280,68 +318,63 @@ def plot_cmd(
     mag_bright: float = -5.0,
     mag_faint: float = 17.0,
     n_bins: Annotated[int, Field(ge=50, le=1000)] = 300,
+    title: Annotated[str | None, Field(description="Optional title; default states the sample radius and star count.")] = None,
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Draw the density colour-magnitude diagram (observational HRD).
+    """Draw the Gaia DR2 colour-magnitude diagram (observational HRD).
 
-    Use this tool last, on the CSV written by compute_absolute_magnitudes.
-    It draws a log-scaled 2D density of M_G vs BP-RP with the magnitude axis
-    inverted (bright at the top), axes matched by default to Babusiaux et al.
-    (2018) Fig. 5c. In the 100 pc diagram you should be able to identify the
-    main sequence, the binary sequence just above it, the red clump near
-    BP-RP = 1.2, M_G = 0.5, and the white dwarf sequence in the lower left.
+    Use this tool last, on the CSV written by compute_gaia_absolute_magnitudes.
+    Large samples are drawn as a log-scaled 2D density of M_G vs BP-RP;
+    small ones (< 5000 stars, e.g. a 10 pc sphere) as individual points.
+    The magnitude axis is inverted (bright at the top), axes matched by
+    default to Babusiaux et al. (2018) Fig. 5c. In the 100 pc diagram you
+    should be able to identify the main sequence, the binary sequence just
+    above it, the red clump near BP-RP = 1.2, M_G = 0.5, and the white
+    dwarf sequence in the lower left.
 
     Args:
-        input_file: CSV written by compute_absolute_magnitudes.
+        input_file: CSV written by compute_gaia_absolute_magnitudes.
         output_dir: Directory where the PNG is written.
         color_min: Left edge of the BP-RP axis.
         color_max: Right edge of the BP-RP axis.
         mag_bright: Top of the M_G axis (bright end).
         mag_faint: Bottom of the M_G axis (faint end).
-        n_bins: Histogram bins per axis.
+        n_bins: Histogram bins per axis (density mode).
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-
     cmd = np.genfromtxt(Path(input_file).expanduser().resolve(),
                         delimiter=",", names=True)
     color, abs_g = cmd["bp_rp"], cmd["abs_g_mag"]
+    radius = (sample_radius_pc(cmd["parallax"])
+              if "parallax" in (cmd.dtype.names or ()) else None)
+    n_shown = int((np.isfinite(color) & np.isfinite(abs_g)).sum())
 
-    fig, ax = plt.subplots(figsize=(6.5, 7.5))
-    counts, _, _, image = ax.hist2d(
-        color, abs_g,
-        bins=n_bins,
-        range=[[color_min, color_max], [mag_bright, mag_faint]],
-        norm=LogNorm(), cmap="viridis", cmin=1,
-    )
-    ax.set_xlim(color_min, color_max)
-    ax.set_ylim(mag_faint, mag_bright)  # bright stars at the top
-    ax.set_xlabel(r"$G_{BP} - G_{RP}$")
-    ax.set_ylabel(r"$M_G$")
-    n_shown = int(np.isfinite(color).sum())
-    ax.set_title(f"Gaia DR2 HRD, d < 100 pc — {n_shown:,} stars")
-    fig.colorbar(image, ax=ax, label="stars per bin")
+    with style() as plt:
+        fig, ax = plt.subplots(figsize=(5.6, 6.6), layout="constrained")
+        image = density(ax, color, abs_g, x_range=(color_min, color_max),
+                        y_range=(mag_bright, mag_faint), bins=n_bins)
+        empty_note(ax, n_shown)
+        ax.set_xlabel(BP_RP)
+        ax.set_ylabel(ABS_G)
+        ax.set_title(wrap(title or f"Gaia DR2 HRD, {_radius_text(radius)}: "
+                         f"{n_shown:,} stars", 48), loc="left")
+        if image is not None:
+            fig.colorbar(image, ax=ax, label="stars per bin", pad=0.02)
+        files = save(fig, _artifact(output_dir, "gaia_cmd_hrd", ".png", f=input_file, c=(color_min, color_max), m=(mag_bright, mag_faint), n=n_bins, t=title), save_pdf)
 
-    plot_path = _outdir(output_dir) / "gaia_cmd_hrd.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-    return ArtifactResult(
-        status="success",
-        files=[str(plot_path)],
-        message=(
-            f"Plotted the density CMD of {n_shown:,} stars "
-            f"(published Fig. 5c count: {gaia.PUBLISHED_100PC_COUNT:,})."
-        ),
-        metadata={
-            "n_stars": n_shown,
-            "published_count_fig5c": gaia.PUBLISHED_100PC_COUNT,
-            "axes": {"bp_rp": [color_min, color_max],
-                     "abs_g_mag": [mag_faint, mag_bright]},
-            "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 5c",
-        },
-    )
+    message = f"Plotted the CMD of {n_shown:,} stars ({_radius_text(radius)})"
+    metadata = {
+        "n_stars": n_shown,
+        "sample_radius_pc": radius,
+        "mode": "density" if image is not None else "points",
+        "axes": {"bp_rp": [color_min, color_max],
+                 "abs_g_mag": [mag_faint, mag_bright]},
+        "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 5c",
+    }
+    if _is_published_sample(radius) or radius is None:
+        message += f"; published Fig. 5c 100 pc count: {gaia.PUBLISHED_100PC_COUNT:,}"
+        metadata["published_count_fig5c"] = gaia.PUBLISHED_100PC_COUNT
+    return ArtifactResult(status="success", files=files, message=message + ".",
+                          metadata=metadata)
 
 
 @validate_call
@@ -349,71 +382,78 @@ def compare_distance_shells(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
     distances_pc: Annotated[list[float], Field(min_length=2, max_length=4)] = [25.0, 50.0, 100.0],
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Draw side-by-side HRDs for nested distance shells (full Fig. 5).
+    """Draw side-by-side Gaia DR2 HRDs for nested distance shells (full Fig. 5).
 
-    Use this tool on the CSV written by apply_quality_filters (it needs the
-    parallax column, so NOT the compute_absolute_magnitudes output). The
+    Use this tool on the CSV written by apply_gaia_quality_filters (it needs
+    the parallax column, so NOT the compute_gaia_absolute_magnitudes output). The
     default distances reproduce the three panels of Babusiaux et al. (2018)
     Fig. 5: stars within 25, 50, and 100 pc. Nearby shells contain far fewer
     stars but reach fainter absolute magnitudes — the sample is
     volume-limited in parallax yet magnitude-limited in G, so the faint end
-    of the diagram is only complete close to the Sun.
+    of the diagram is only complete close to the Sun. Shells larger than the
+    input sample's own radius cannot add stars and are flagged.
 
     Args:
-        input_file: CSV written by apply_quality_filters (or
+        input_file: CSV written by apply_gaia_quality_filters (or
             fetch_gaia_sample) — must still contain the parallax column.
         output_dir: Directory where the PNG is written.
         distances_pc: Shell radii in parsec, small to large. A star is in a
             shell when parallax >= 1000/distance.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-
     data = gaia.load_sample_csv(input_file)
-    if "parallax" not in (data.dtype.names or ()):
+    if not {"parallax", "phot_g_mean_mag"} <= set(data.dtype.names or ()):
         raise ValueError(
-            "input_file has no parallax column; pass the CSV from "
-            "apply_quality_filters, not from compute_absolute_magnitudes."
+            "input_file lacks the parallax/phot_g_mean_mag columns; pass the "
+            "CSV from apply_gaia_quality_filters, not from "
+            "compute_gaia_absolute_magnitudes."
         )
     distances = sorted(distances_pc)
+    radius = sample_radius_pc(data["parallax"])
 
-    fig, axes = plt.subplots(1, len(distances),
-                             figsize=(4.6 * len(distances), 6.2),
-                             sharex=True, sharey=True)
     counts = {}
-    for ax, d_pc in zip(np.atleast_1d(axes), distances):
-        shell = data[(data["parallax"] >= 1000.0 / d_pc)
-                     & ~np.isnan(data["bp_rp"])]
-        abs_g = shell["phot_g_mean_mag"] + 5 * np.log10(shell["parallax"]) - 10
-        ax.hist2d(shell["bp_rp"], abs_g, bins=250,
-                  range=[[-1, 5], [-5, 17]], norm=LogNorm(),
-                  cmap="viridis", cmin=1)
-        ax.set_xlim(-1, 5)
-        ax.set_ylim(17, -5)
-        ax.set_xlabel(r"$G_{BP} - G_{RP}$")
-        ax.set_title(f"d < {d_pc:g} pc — {len(shell):,} stars")
-        counts[f"{d_pc:g}_pc"] = len(shell)
-    np.atleast_1d(axes)[0].set_ylabel(r"$M_G$")
-    fig.suptitle("Gaia DR2 HRD by distance shell", y=0.99)
+    shells = [data[(data["parallax"] >= 1000.0 / d_pc) & ~np.isnan(data["bp_rp"])]
+              for d_pc in distances]
+    as_density = use_density(*(len(s) for s in shells))
+    norm = (shared_norm([(s["bp_rp"], _abs_g(s)) for s in shells],
+                        x_range=(-1, 5), y_range=(-5, 17), bins=250)
+            if as_density else None)
+    with style() as plt:
+        fig, axes = plt.subplots(1, len(distances),
+                                 figsize=(3.4 * len(distances) + 0.8, 5.4),
+                                 sharex=True, sharey=True, layout="constrained")
+        image = None
+        for ax, d_pc, shell in zip(np.atleast_1d(axes), distances, shells):
+            abs_g = _abs_g(shell)
+            im = density(ax, shell["bp_rp"], abs_g, x_range=(-1, 5),
+                         y_range=(-5, 17), bins=250, as_density=as_density,
+                         norm=norm)
+            image = im or image
+            empty_note(ax, len(shell))
+            ax.set_xlabel(BP_RP)
+            ax.set_title(f"d < {d_pc:g} pc\n{len(shell):,} stars")
+            counts[f"{d_pc:g}_pc"] = len(shell)
+        np.atleast_1d(axes)[0].set_ylabel(ABS_G)
+        if image is not None:
+            fig.colorbar(image, ax=list(np.atleast_1d(axes)),
+                         label="stars per bin", pad=0.02, aspect=30)
+        files = save(fig, _artifact(output_dir, "gaia_cmd_shells", ".png", f=input_file, d=distances_pc), save_pdf)
 
-    plot_path = _outdir(output_dir) / "gaia_cmd_shells.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
+    beyond = [d for d in distances if radius and d > radius * 1.001]
+    message = ("Plotted HRDs for "
+               + ", ".join(f"d < {d:g} pc ({counts[f'{d:g}_pc']:,} stars)"
+                           for d in distances) + ".")
+    if beyond:
+        message += (f" NOTE: the input sample only reaches {radius:g} pc, so "
+                    f"shell(s) {beyond} pc are incomplete — fetch with a "
+                    "smaller min_parallax_mas to fill them.")
     return ArtifactResult(
-        status="success",
-        files=[str(plot_path)],
-        message=(
-            "Plotted HRDs for "
-            + ", ".join(f"d < {d:g} pc ({counts[f'{d:g}_pc']:,} stars)"
-                        for d in distances)
-            + "."
-        ),
+        status="success", files=files, message=message,
         metadata={
             "star_counts": counts,
+            "sample_radius_pc": radius,
+            "shells_beyond_sample_pc": beyond,
             "published_count_100pc": gaia.PUBLISHED_100PC_COUNT,
             "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 5",
         },
@@ -427,10 +467,11 @@ def plot_kinematics_cmd(
     slow_max_km_s: Annotated[float, Field(gt=0)] = 40.0,
     mid_range_km_s: tuple[float, float] = (60.0, 150.0),
     halo_min_km_s: Annotated[float, Field(gt=0)] = 200.0,
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Slice the HRD by tangential velocity (the paper's Fig. 7).
+    """Slice the Gaia DR2 HRD by tangential velocity (the paper's Fig. 7).
 
-    Use this tool on the CSV from apply_quality_filters. The tangential
+    Use this tool on the CSV from apply_gaia_quality_filters. The tangential
     velocity v_T = 4.74 * pm[mas/yr] / parallax[mas] km/s needs only Gaia
     astrometry, and slicing on it separates stellar populations by age and
     origin: slow stars are the young thin disc (upper main sequence
@@ -439,18 +480,13 @@ def plot_kinematics_cmd(
     the three velocity-sliced HRDs, and a map of mean v_T across the CMD.
 
     Args:
-        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+        input_file: CSV from fetch_gaia_sample or apply_gaia_quality_filters
             (needs pmra, pmdec, parallax).
         output_dir: Directory where the PNGs are written.
         slow_max_km_s: Upper v_T bound of the "thin disc" panel.
         mid_range_km_s: (low, high) v_T bounds of the middle panel.
         halo_min_km_s: Lower v_T bound of the "halo" panel.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-
     data = gaia.load_sample_csv(input_file)
     _require_columns(data, ["pmra", "pmdec", "parallax", "phot_g_mean_mag", "bp_rp"])
     abs_g, color = _abs_g(data), data["bp_rp"]
@@ -458,44 +494,55 @@ def plot_kinematics_cmd(
 
     mid_lo, mid_hi = mid_range_km_s
     slices = [
-        (f"$v_T$ < {slow_max_km_s:g} km/s — mostly thin disc", v_tan < slow_max_km_s),
-        (f"{mid_lo:g} < $v_T$ < {mid_hi:g} km/s — older discs",
+        (rf"$v_T < {slow_max_km_s:g}$ km/s", "mostly thin disc",
+         v_tan < slow_max_km_s),
+        (rf"${mid_lo:g} < v_T < {mid_hi:g}$ km/s", "older discs",
          (v_tan > mid_lo) & (v_tan < mid_hi)),
-        (f"$v_T$ > {halo_min_km_s:g} km/s — halo", v_tan > halo_min_km_s),
+        (rf"$v_T > {halo_min_km_s:g}$ km/s", "halo", v_tan > halo_min_km_s),
     ]
-    fig, axes = plt.subplots(1, 3, figsize=(14, 6), sharex=True, sharey=True)
-    counts = {}
-    for ax, (title, sel) in zip(axes, slices):
-        ax.hist2d(color[sel], abs_g[sel], bins=200, range=[[-1, 5], [-5, 17]],
-                  norm=LogNorm(), cmap="viridis", cmin=1)
+    as_density = use_density(*(int(sel.sum()) for *_, sel in slices))
+    norm = (shared_norm([(color[sel], abs_g[sel]) for *_, sel in slices],
+                        x_range=(-1, 5), y_range=(-5, 17), bins=200)
+            if as_density else None)
+    with style() as plt:
+        fig, axes = plt.subplots(1, 3, figsize=(11.5, 5.4), sharex=True,
+                                 sharey=True, layout="constrained")
+        image = None
+        for ax, (cut, population, sel) in zip(axes, slices):
+            im = density(ax, color[sel], abs_g[sel], x_range=(-1, 5),
+                         y_range=(-5, 17), bins=200, as_density=as_density,
+                         norm=norm)
+            image = im or image
+            empty_note(ax, int(sel.sum()))
+            ax.set_xlabel(BP_RP)
+            ax.set_title(f"{cut}: {population}\n{int(sel.sum()):,} stars")
+        axes[0].set_ylabel(ABS_G)
+        if image is not None:
+            fig.colorbar(image, ax=list(axes), label="stars per bin",
+                         pad=0.02, aspect=30)
+        files = save(fig, _artifact(output_dir, "gaia_cmd_velocity_slices", ".png", f=input_file, v=(slow_max_km_s, mid_range_km_s, halo_min_km_s)), save_pdf)
+
+        H_n, xe, ye = np.histogram2d(color, abs_g, bins=200, range=[[-1, 5], [-5, 17]])
+        H_v, _, _ = np.histogram2d(color, abs_g, bins=200, range=[[-1, 5], [-5, 17]],
+                                   weights=np.nan_to_num(v_tan))
+        mean_v = np.where(H_n >= 3, H_v / np.maximum(H_n, 1), np.nan)
+        fig, ax = plt.subplots(figsize=(5.8, 6.4), layout="constrained")
+        im = ax.pcolormesh(xe, ye, np.ma.masked_invalid(mean_v.T), cmap="magma",
+                           vmin=10, vmax=100, rasterized=True)
+        ax.set_xlim(-1, 5)
         ax.set_ylim(17, -5)
-        ax.set_xlabel(r"$G_{BP} - G_{RP}$")
-        ax.set_title(f"{title}\n{int(sel.sum()):,} stars")
-        counts[title.split("$")[0].strip() or title] = int(sel.sum())
-    axes[0].set_ylabel(r"$M_G$")
-    slices_path = _outdir(output_dir) / "gaia_cmd_velocity_slices.png"
-    fig.savefig(slices_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+        empty_note(ax, int(np.isfinite(mean_v).sum()))
+        ax.set_xlabel(BP_RP)
+        ax.set_ylabel(ABS_G)
+        ax.set_title("Mean tangential velocity across the HRD", loc="left")
+        fig.colorbar(im, ax=ax, pad=0.02,
+                     label=r"mean $v_T$ [km s$^{-1}$] (bins with $\geq 3$ stars)")
+        files += save(fig, _artifact(output_dir, "gaia_cmd_mean_vtan", ".png", f=input_file, v=(slow_max_km_s, mid_range_km_s, halo_min_km_s)), save_pdf)
 
-    H_n, xe, ye = np.histogram2d(color, abs_g, bins=200, range=[[-1, 5], [-5, 17]])
-    H_v, _, _ = np.histogram2d(color, abs_g, bins=200, range=[[-1, 5], [-5, 17]],
-                               weights=np.nan_to_num(v_tan))
-    mean_v = np.where(H_n >= 3, H_v / np.maximum(H_n, 1), np.nan)
-    fig, ax = plt.subplots(figsize=(6.8, 7))
-    im = ax.pcolormesh(xe, ye, mean_v.T, cmap="magma", vmin=10, vmax=100)
-    ax.set_ylim(17, -5)
-    ax.set_xlabel(r"$G_{BP} - G_{RP}$")
-    ax.set_ylabel(r"$M_G$")
-    ax.set_title("Mean tangential velocity across the HRD")
-    fig.colorbar(im, ax=ax, label=r"mean $v_T$ [km/s] (bins with $\geq$ 3 stars)")
-    map_path = _outdir(output_dir) / "gaia_cmd_mean_vtan.png"
-    fig.savefig(map_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-    slice_counts = [int(sel.sum()) for _, sel in slices]
+    slice_counts = [int(sel.sum()) for *_, sel in slices]
     return ArtifactResult(
         status="success",
-        files=[str(slices_path), str(map_path)],
+        files=files,
         message=(
             f"Velocity-sliced HRDs: {slice_counts[0]:,} slow / "
             f"{slice_counts[1]:,} intermediate / {slice_counts[2]:,} halo "
@@ -511,56 +558,56 @@ def plot_kinematics_cmd(
     )
 
 
+def _field_with_highlight(ax, data_color, data_mag, hl_color, hl_mag, label,
+                          x_range=(-1, 5), y_range=(-5, 17)):
+    """Grey field-star density with one highlighted population on top."""
+    density(ax, data_color, data_mag, x_range=x_range, y_range=y_range,
+            bins=300, cmap=FIELD_GREY, point_color="0.7")
+    ax.scatter(hl_color, hl_mag, s=9, color=PALETTE[1], linewidths=0,
+               label=label, zorder=3)
+
+
 @validate_call
 def plot_variable_stars_cmd(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Highlight DR2's flagged variable stars on the HRD (the paper's Fig. 15).
+    """Highlight Gaia DR2's flagged variable stars on the HRD (the paper's Fig. 15).
 
-    Use this tool on the CSV from apply_quality_filters. Within 100 pc the
+    Use this tool on the CSV from apply_gaia_quality_filters. Within 100 pc the
     flagged variables are almost entirely flaring and spotted M dwarfs on
     the lower main sequence; the bright pulsators that fill this figure in
     the all-sky sample (Cepheids, RR Lyrae) have no representatives this
     close to the Sun.
 
     Args:
-        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+        input_file: CSV from fetch_gaia_sample or apply_gaia_quality_filters
             (needs the "variable" 0/1 column).
         output_dir: Directory where the PNG is written.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-
     data = gaia.load_sample_csv(input_file)
     _require_columns(data, ["variable", "parallax", "phot_g_mean_mag", "bp_rp"])
     abs_g, color = _abs_g(data), data["bp_rp"]
     variable = data["variable"] > 0.5
+    n_var = int(variable.sum())
 
-    fig, ax = plt.subplots(figsize=(6.8, 7))
-    ax.hist2d(color, abs_g, bins=300, range=[[-1, 5], [-5, 17]],
-              norm=LogNorm(), cmap="Greys", cmin=1)
-    ax.scatter(color[variable], abs_g[variable], s=8, color="C3",
-               label=f"flagged VARIABLE — {int(variable.sum()):,} stars")
-    ax.set_ylim(17, -5)
-    ax.set_xlabel(r"$G_{BP} - G_{RP}$")
-    ax.set_ylabel(r"$M_G$")
-    ax.legend(loc="upper right")
-
-    plot_path = _outdir(output_dir) / "gaia_cmd_variables.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    with style() as plt:
+        fig, ax = plt.subplots(figsize=(5.6, 6.4), layout="constrained")
+        _field_with_highlight(ax, color, abs_g, color[variable], abs_g[variable],
+                              f"flagged VARIABLE ({n_var:,})")
+        ax.set_xlabel(BP_RP)
+        ax.set_ylabel(ABS_G)
+        ax.set_title(wrap(f"Gaia DR2 variables among {len(data):,} stars", 48),
+                     loc="left")
+        ax.legend(loc="upper right", markerscale=1.8)
+        files = save(fig, _artifact(output_dir, "gaia_cmd_variables", ".png", f=input_file), save_pdf)
     return ArtifactResult(
         status="success",
-        files=[str(plot_path)],
-        message=(
-            f"Marked {int(variable.sum()):,} flagged variables on the HRD "
-            f"of {len(data):,} stars."
-        ),
+        files=files,
+        message=f"Marked {n_var:,} flagged variables on the HRD of {len(data):,} stars.",
         metadata={
-            "n_variable": int(variable.sum()),
+            "n_variable": n_var,
             "n_total": len(data),
             "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 15",
         },
@@ -571,25 +618,21 @@ def plot_variable_stars_cmd(
 def plot_infrared_cmd(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Draw the infrared HRD from the 2MASS cross-match (the paper's Fig. 6).
+    """Draw the infrared HRD of Gaia DR2 stars via the 2MASS cross-match (Fig. 6).
 
-    Use this tool on the CSV from apply_quality_filters. The sample carries
+    Use this tool on the CSV from apply_gaia_quality_filters. The sample carries
     2MASS J and Ks from a server-side cross-match (NaN where unmatched). In
     the infrared the main sequence is less sensitive to metallicity and the
     M dwarfs bunch up; white dwarfs are largely too faint for 2MASS and
     drop out — a photometric completeness lesson in one panel.
 
     Args:
-        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+        input_file: CSV from fetch_gaia_sample or apply_gaia_quality_filters
             (needs j_m, ks_m).
         output_dir: Directory where the PNG is written.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-
     data = gaia.load_sample_csv(input_file)
     _require_columns(data, ["j_m", "ks_m", "parallax"])
     matched = np.isfinite(data["j_m"]) & np.isfinite(data["ks_m"])
@@ -597,21 +640,21 @@ def plot_infrared_cmd(
     abs_ks = subset["ks_m"] + 5 * np.log10(subset["parallax"]) - 10
     j_ks = subset["j_m"] - subset["ks_m"]
 
-    fig, ax = plt.subplots(figsize=(6.8, 7))
-    h = ax.hist2d(j_ks, abs_ks, bins=250, range=[[-0.4, 1.4], [-6, 11]],
-                  norm=LogNorm(), cmap="viridis", cmin=1)
-    ax.set_ylim(11, -6)
-    ax.set_xlabel(r"$J - K_s$")
-    ax.set_ylabel(r"$M_{K_s}$")
-    ax.set_title(f"2MASS HRD — {int(matched.sum()):,} of {len(data):,} stars matched")
-    fig.colorbar(h[3], ax=ax, label="stars per bin")
-
-    plot_path = _outdir(output_dir) / "gaia_cmd_infrared.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    with style() as plt:
+        fig, ax = plt.subplots(figsize=(5.6, 6.4), layout="constrained")
+        image = density(ax, j_ks, abs_ks, x_range=(-0.4, 1.4), y_range=(-6, 11),
+                        bins=250)
+        empty_note(ax, int(matched.sum()))
+        ax.set_xlabel(r"$J - K_s$")
+        ax.set_ylabel(r"$M_{K_s}$")
+        ax.set_title(wrap(f"2MASS HRD: {int(matched.sum()):,} of {len(data):,} "
+                          "Gaia stars matched", 48), loc="left")
+        if image is not None:
+            fig.colorbar(image, ax=ax, label="stars per bin", pad=0.02)
+        files = save(fig, _artifact(output_dir, "gaia_cmd_infrared", ".png", f=input_file), save_pdf)
     return ArtifactResult(
         status="success",
-        files=[str(plot_path)],
+        files=files,
         message=(
             f"Infrared HRD of {int(matched.sum()):,} 2MASS-matched stars "
             f"(of {len(data):,})."
@@ -625,13 +668,14 @@ def plot_infrared_cmd(
 
 
 @validate_call
-def plot_sky_map(
+def plot_gaia_sky_map(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Map the sample on the sky in galactic coordinates.
+    """Map a Gaia DR2 star sample on the sky in galactic coordinates.
 
-    Use this tool on the CSV from apply_quality_filters. Within 100 pc the
+    Use this tool on the CSV from apply_gaia_quality_filters. Within 100 pc the
     sky should be nearly isotropic — and almost is: the overdensity at
     l = 180, b = -22 is the Hyades, the nearest open cluster (d = 47 pc),
     and the stark empty patches are regions Gaia's scanning law had visited
@@ -639,34 +683,37 @@ def plot_sky_map(
     cut. Quality filters imprint the survey's geometry on the sample.
 
     Args:
-        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+        input_file: CSV from fetch_gaia_sample or apply_gaia_quality_filters
             (needs l, b).
         output_dir: Directory where the PNG is written.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-
     data = gaia.load_sample_csv(input_file)
     _require_columns(data, ["l", "b"])
 
-    fig, ax = plt.subplots(figsize=(11, 5))
-    h = ax.hist2d(data["l"], data["b"], bins=[360, 180],
-                  range=[[0, 360], [-90, 90]], norm=LogNorm(), cmap="viridis")
-    ax.set_xlabel("galactic longitude $l$ [deg]")
-    ax.set_ylabel("galactic latitude $b$ [deg]")
-    ax.set_title(f"{len(data):,} stars on the sky")
-    ax.annotate("Hyades", (180, -22), xytext=(230, -55), color="white",
-                arrowprops=dict(arrowstyle="->", color="white"))
-    fig.colorbar(h[3], ax=ax, label="stars per deg$^2$ bin")
-
-    plot_path = _outdir(output_dir) / "gaia_sky_map.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    with style() as plt:
+        fig, ax = plt.subplots(figsize=(9.5, 4.9), layout="constrained")
+        image = density(ax, data["l"], data["b"], x_range=(0, 360),
+                        y_range=(-90, 90), bins=[360, 180], invert_y=False)
+        empty_note(ax, len(data))
+        ax.set_xlim(360, 0)   # astronomical convention: l increases leftward
+        ax.set_xlabel(r"Galactic longitude $l$ [deg]")
+        ax.set_ylabel(r"Galactic latitude $b$ [deg]")
+        ax.set_xticks(range(0, 361, 60))
+        ax.set_yticks(range(-90, 91, 30))
+        ax.set_title(f"Gaia DR2 sample on the sky: {len(data):,} stars", loc="left")
+        ax.annotate("Hyades", (180, -22), xytext=(140, -64), fontsize=11,
+                    color="black", ha="center",
+                    bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none",
+                              alpha=0.9),
+                    arrowprops=dict(arrowstyle="->", lw=1.3, color="black"))
+        if image is not None:
+            # 1x1 deg (l, b) cells shrink toward the poles: per-bin, not per-deg^2
+            fig.colorbar(image, ax=ax, label=r"stars per $1^\circ \times 1^\circ$ bin",
+                         pad=0.015)
+        files = save(fig, _artifact(output_dir, "gaia_sky_map", ".png", f=input_file), save_pdf)
     return ArtifactResult(
         status="success",
-        files=[str(plot_path)],
+        files=files,
         message=f"Sky map of {len(data):,} stars in galactic coordinates.",
         metadata={
             "n_stars": len(data),
@@ -679,28 +726,25 @@ def plot_sky_map(
 def plot_hyades(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Extract the Hyades cluster from the field and draw its HRD.
+    """Extract the Hyades cluster from the Gaia DR2 field and draw its HRD.
 
-    Use this tool on the CSV from apply_quality_filters. The Hyades is the
+    Use this tool on the CSV from apply_gaia_quality_filters. The Hyades is the
     nearest open cluster (d = 47 pc) and its members share one proper
     motion and one parallax — a box in (parallax, pmra, pmdec, l, b) pulls
     them cleanly out of the field with no colour information used at all.
     Because the cluster is a single age (~700 Myr) and single metallicity,
     its main sequence is razor thin compared to the field's spread; its
     unresolved binaries stand out above it (the paper studies 46 clusters
-    this way, Sect. 4).
+    this way, Sect. 4). Needs a sample reaching >= 53 pc (the default
+    100 pc one).
 
     Args:
-        input_file: CSV from fetch_gaia_sample or apply_quality_filters
+        input_file: CSV from fetch_gaia_sample or apply_gaia_quality_filters
             (needs parallax, pmra, pmdec, l, b).
         output_dir: Directory where the PNG is written.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
-
     data = gaia.load_sample_csv(input_file)
     _require_columns(data, ["parallax", "pmra", "pmdec", "l", "b",
                             "phot_g_mean_mag", "bp_rp"])
@@ -711,43 +755,46 @@ def plot_hyades(
         & (np.abs(data["l"] - 180) < 20) & (np.abs(data["b"] + 22) < 20)
     )
     cluster = data[members]
-    abs_g_all, abs_g_cl = _abs_g(data), _abs_g(cluster)
+    n_mem = int(members.sum())
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6.5))
-    ax1.scatter(data["l"], data["b"], s=1, color="0.8")
-    ax1.scatter(cluster["l"], cluster["b"], s=6, color="C3")
-    ax1.set_xlim(220, 140)
-    ax1.set_ylim(-45, 5)
-    ax1.set_xlabel("galactic longitude $l$ [deg]")
-    ax1.set_ylabel("galactic latitude $b$ [deg]")
-    ax1.set_title(f"Hyades members on the sky — {int(members.sum()):,} stars")
+    with style() as plt:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 5.4),
+                                       layout="constrained",
+                                       gridspec_kw={"width_ratios": [1.15, 1]})
+        near = (np.abs(data["l"] - 180) < 40) & (data["b"] > -45) & (data["b"] < 5)
+        ax1.scatter(data["l"][near], data["b"][near], s=1.5, color="0.78",
+                    linewidths=0, rasterized=True, label="field")
+        ax1.scatter(cluster["l"], cluster["b"], s=9, color=PALETTE[1],
+                    linewidths=0, label=f"Hyades members ({n_mem:,})")
+        ax1.set_xlim(220, 140)
+        ax1.set_ylim(-45, 5)
+        ax1.set_xlabel(r"Galactic longitude $l$ [deg]")
+        ax1.set_ylabel(r"Galactic latitude $b$ [deg]")
+        ax1.set_title("Selected by parallax and proper motion only", loc="left")
+        ax1.legend(loc="lower left", markerscale=3, frameon=True,
+                   framealpha=0.92, edgecolor="none")
 
-    ax2.hist2d(data["bp_rp"], abs_g_all, bins=300, range=[[-1, 5], [-5, 17]],
-               norm=LogNorm(), cmap="Greys", cmin=1)
-    ax2.scatter(cluster["bp_rp"], abs_g_cl, s=8, color="C3",
-                label="Hyades members")
-    ax2.set_ylim(17, -5)
-    ax2.set_xlabel(r"$G_{BP} - G_{RP}$")
-    ax2.set_ylabel(r"$M_G$")
-    ax2.set_title("One age, one metallicity: a razor-thin sequence")
-    ax2.legend(loc="upper right")
-
-    plot_path = _outdir(output_dir) / "gaia_hyades.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+        _field_with_highlight(ax2, data["bp_rp"], _abs_g(data),
+                              cluster["bp_rp"], _abs_g(cluster), "Hyades members")
+        ax2.set_xlabel(BP_RP)
+        ax2.set_ylabel(ABS_G)
+        ax2.set_title("One age, one metallicity: a thin sequence", loc="left")
+        ax2.legend(loc="upper right", markerscale=1.8)
+        files = save(fig, _artifact(output_dir, "gaia_hyades", ".png", f=input_file), save_pdf)
 
     mean_plx = float(np.mean(cluster["parallax"])) if len(cluster) else float("nan")
     return ArtifactResult(
         status="success",
-        files=[str(plot_path)],
+        files=files,
         message=(
-            f"Selected {int(members.sum()):,} Hyades members by parallax and "
+            f"Selected {n_mem:,} Hyades members by parallax and "
             f"proper motion (mean distance "
             f"{1000.0 / mean_plx:.1f} pc)." if len(cluster) else
-            "No Hyades members found in this input (needs the 100 pc sample)."
+            "No Hyades members found in this input (needs a sample reaching "
+            "~53 pc, e.g. the default 100 pc one)."
         ),
         metadata={
-            "n_members": int(members.sum()),
+            "n_members": n_mem,
             "selection": {"parallax_mas": [19, 24], "pmra_mas_yr": [80, 140],
                           "pmdec_mas_yr": [-60, -10], "l_deg": [160, 200],
                           "b_deg": [-42, -2]},
@@ -761,10 +808,11 @@ def plot_hyades(
 def plot_white_dwarfs(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """Zoom in on the white dwarf sequence (the paper's Fig. 13).
+    """Zoom in on the Gaia DR2 white dwarf sequence (the paper's Fig. 13).
 
-    Use this tool on the CSV from apply_quality_filters. White dwarfs are
+    Use this tool on the CSV from apply_gaia_quality_filters. White dwarfs are
     selected as everything well below the main sequence
     (M_G > 3.25 (BP-RP) + 9.63); within 100 pc that is a nearly complete,
     nearly extinction-free sample of degenerate remnants. At this precision
@@ -773,39 +821,39 @@ def plot_white_dwarfs(
     clearly in exactly this DR2 sample.
 
     Args:
-        input_file: CSV from fetch_gaia_sample or apply_quality_filters.
+        input_file: CSV from fetch_gaia_sample or apply_gaia_quality_filters.
         output_dir: Directory where the PNG is written.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     data = gaia.load_sample_csv(input_file)
     _require_columns(data, ["parallax", "phot_g_mean_mag", "bp_rp"])
     abs_g = _abs_g(data)
     wd = abs_g > 3.25 * data["bp_rp"] + 9.63
     dwarfs = data[wd]
+    radius = sample_radius_pc(data["parallax"])
 
-    fig, ax = plt.subplots(figsize=(7, 6.5))
-    ax.scatter(dwarfs["bp_rp"], abs_g[wd], s=3, color="C0", alpha=0.5)
-    ax.set_xlim(-0.7, 1.7)
-    ax.set_ylim(16.5, 8.5)
-    ax.set_xlabel(r"$G_{BP} - G_{RP}$")
-    ax.set_ylabel(r"$M_G$")
-    ax.set_title(f"White dwarfs within 100 pc — {int(wd.sum()):,} stars")
-
-    plot_path = _outdir(output_dir) / "gaia_white_dwarfs.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    with style() as plt:
+        fig, ax = plt.subplots(figsize=(5.8, 5.6), layout="constrained")
+        ax.scatter(dwarfs["bp_rp"], abs_g[wd], s=3 if wd.sum() > 2000 else 10,
+                   color=PALETTE[0], alpha=0.5, linewidths=0,
+                   rasterized=wd.sum() > 1000)
+        ax.set_xlim(-0.7, 1.7)
+        ax.set_ylim(16.5, 8.5)
+        empty_note(ax, int(wd.sum()))
+        ax.set_xlabel(BP_RP)
+        ax.set_ylabel(ABS_G)
+        ax.set_title(wrap(f"Gaia DR2 white dwarfs, {_radius_text(radius)}: "
+                          f"{int(wd.sum()):,} stars", 48), loc="left")
+        files = save(fig, _artifact(output_dir, "gaia_white_dwarfs", ".png", f=input_file), save_pdf)
     return ArtifactResult(
         status="success",
-        files=[str(plot_path)],
+        files=files,
         message=(
             f"Zoomed on {int(wd.sum()):,} white dwarfs "
             "(selected by M_G > 3.25(BP-RP) + 9.63)."
         ),
         metadata={
             "n_white_dwarfs": int(wd.sum()),
+            "sample_radius_pc": radius,
             "selection": "abs_g_mag > 3.25 * bp_rp + 9.63",
             "reference": "Babusiaux et al. 2018, A&A 616, A10, Fig. 13",
         },
@@ -813,68 +861,79 @@ def plot_white_dwarfs(
 
 
 @validate_call
-def plot_luminosity_function(
+def plot_gaia_luminosity_function(
     input_file: Annotated[str, Field(min_length=1)],
     output_dir: Annotated[str, Field(min_length=1)],
+    save_pdf: Annotated[bool, SAVE_PDF] = False,
 ) -> ArtifactResult:
-    """The stellar census: how many stars of each luminosity?
+    """Stellar luminosity function of a Gaia DR2 solar-neighbourhood sample.
 
-    Use this tool on the CSV from apply_quality_filters. It histograms M_G
-    for the full sample and overlays the 25 pc sample scaled by the volume
-    ratio (64x): where the scaled nearby counts exceed the full sample, the
-    100 pc sample is incomplete (the faint end — the survey is
-    magnitude-limited in G). The headline result: the most common stars are
-    faint M dwarfs, and the Sun (M_G = 4.67) is brighter than the vast
-    majority of its neighbours.
+    How many stars of each luminosity? Use this tool on the CSV from
+    apply_gaia_quality_filters. It histograms M_G for the full sample (radius
+    R = 1000 / min parallax) and overlays the inner R/4 sphere scaled by the
+    volume ratio (64x): where the scaled inner counts exceed the full
+    sample, the outer sample is incomplete (the faint end — the survey is
+    magnitude-limited in G). For the default 100 pc sample that is the
+    25 pc vs 100 pc comparison. The headline result: the most common stars
+    are faint M dwarfs, and the Sun (M_G = 4.67) is brighter than the vast
+    majority of its neighbours. (A stellar census, not a galaxy luminosity
+    function.)
 
     Args:
-        input_file: CSV from fetch_gaia_sample or apply_quality_filters.
+        input_file: CSV from fetch_gaia_sample or apply_gaia_quality_filters.
         output_dir: Directory where the PNG is written.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     SUN_ABS_G = 4.67
 
     data = gaia.load_sample_csv(input_file)
     _require_columns(data, ["parallax", "phot_g_mean_mag"])
     abs_g = _abs_g(data)
-    near = data["parallax"] >= 40.0  # d < 25 pc
+    radius = sample_radius_pc(data["parallax"]) or 100.0
+    inner = radius / 4.0
+    near = data["parallax"] >= 1000.0 / inner
+    show_inner = int(near.sum()) >= 10   # fewer: the x64 overlay is pure noise
     bins = np.arange(-4, 17.5, 0.5)
 
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    ax.hist(abs_g, bins=bins, histtype="stepfilled", alpha=0.4, color="C0",
-            label=f"d < 100 pc ({len(data):,} stars)")
-    ax.hist(abs_g[near], bins=bins, histtype="step", color="C3", linewidth=1.8,
-            weights=np.full(int(near.sum()), 64.0),
-            label=f"d < 25 pc, scaled x64 ({int(near.sum()):,} stars)")
-    ax.axvline(SUN_ABS_G, color="0.3", linestyle="--", linewidth=1.2)
-    ax.text(SUN_ABS_G + 0.15, ax.get_ylim()[1] * 0.5, "Sun", rotation=90,
-            color="0.3", va="center")
-    ax.set_yscale("log")
-    ax.set_xlabel(r"$M_G$")
-    ax.set_ylabel("stars per 0.5 mag bin")
-    ax.set_title("Luminosity function of the solar neighbourhood")
-    ax.legend(loc="upper left", fontsize="small")
+    with style() as plt:
+        fig, ax = plt.subplots(figsize=(6.8, 4.6), layout="constrained")
+        ax.hist(abs_g, bins=bins, histtype="stepfilled", alpha=0.35,
+                color=PALETTE[0], edgecolor=PALETTE[0], linewidth=1.2,
+                label=f"d < {radius:g} pc ({len(data):,} stars)")
+        if show_inner:
+            ax.hist(abs_g[near], bins=bins, histtype="step", color=PALETTE[1],
+                    linewidth=1.8, linestyle="--",
+                    weights=np.full(int(near.sum()), 64.0),
+                    label=rf"d < {inner:g} pc, $\times$64 ({int(near.sum()):,} stars)")
+        ax.axvline(SUN_ABS_G, color=MUTED, linestyle=":", linewidth=1.3)
+        ax.set_yscale("log")
+        ax.text(SUN_ABS_G + 0.2, 0.96, "Sun", transform=ax.get_xaxis_transform(),
+                color=MUTED, va="top")
+        ax.set_xlabel(ABS_G)
+        ax.set_ylabel("stars per 0.5 mag bin")
+        ax.set_title("Luminosity function of the solar neighbourhood", loc="left")
+        ax.legend(loc="upper left")
+        files = save(fig, _artifact(output_dir, "gaia_luminosity_function", ".png", f=input_file),
+                     save_pdf)
 
-    plot_path = _outdir(output_dir) / "gaia_luminosity_function.png"
-    fig.savefig(plot_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-
-    fainter = float(np.mean(abs_g > SUN_ABS_G))
+    fainter = float(np.mean(abs_g > SUN_ABS_G)) if len(data) else float("nan")
+    completeness = (
+        f"the faint end is incomplete where the scaled d < {inner:g} pc "
+        "counts exceed it." if show_inner else
+        f"too few stars within {inner:g} pc ({int(near.sum())}) for the "
+        "completeness overlay — use a larger sample (e.g. the default 100 pc)."
+    )
     return ArtifactResult(
         status="success",
-        files=[str(plot_path)],
+        files=files,
         message=(
-            f"Luminosity function of {len(data):,} stars: "
-            f"{100 * fainter:.0f}% are fainter than the Sun; the faint end "
-            "of the 100 pc sample is incomplete where the scaled 25 pc "
-            "counts exceed it."
+            f"Luminosity function of {len(data):,} stars (d < {radius:g} pc): "
+            f"{100 * fainter:.0f}% are fainter than the Sun; {completeness}"
         ),
         metadata={
             "n_stars": len(data),
-            "n_within_25pc": int(near.sum()),
+            "sample_radius_pc": radius,
+            "inner_radius_pc": inner,
+            "n_within_inner": int(near.sum()),
             "fraction_fainter_than_sun": round(fainter, 3),
             "sun_abs_g_mag": SUN_ABS_G,
         },

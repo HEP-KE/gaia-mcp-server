@@ -39,7 +39,8 @@ tool_modules = ["tools"]
 data/gaia_dr2_100pc.csv.gz        bundled snapshot of the 100 pc query (offline fallback)
 tools/
   gaia.py                         ADQL query, bundled loader, Babusiaux+ 2018 quality cuts
-  cmd_tools.py                    the 4 tool functions + ArtifactResult contract
+  cmd_tools.py                    the 12 tool functions + ArtifactResult contract
+  plotting.py                     shared publication figure style (no LaTeX needed)
   __init__.py                     __all__ — ONLY these names become tools
 mcp_server/                       generic drop-in wrapper (FastMCP)
 notebooks/01_manual_pipeline.ipynb  a walkthrough: data → cuts → HRD → tools → server
@@ -50,18 +51,34 @@ tests/test_tools.py               tools tested as plain Python, no MCP or networ
 
 | tool | what it does |
 |---|---|
-| `fetch_gaia_sample(output_dir, ...)` | ADQL query of `gaiadr2.gaia_source` (parallax ≥ 10 mas, SNR > 10); falls back to the bundled snapshot offline |
-| `apply_quality_filters(input_file, output_dir, ...)` | the Babusiaux+ 2018 photometric + astrometric cuts, with per-filter counts and justifications |
-| `compute_absolute_magnitudes(input_file, output_dir)` | M_G = G + 5 log₁₀(ϖ/mas) − 10 |
-| `plot_cmd(input_file, output_dir, ...)` | log-density HRD, axes matched to the published Fig. 5c |
+| `fetch_gaia_sample(output_dir, ...)` | ADQL query of `gaiadr2.gaia_source` (default parallax ≥ 10 mas = 100 pc, SNR > 10; up to 1000 mas for tiny nearby samples); falls back to the bundled snapshot offline |
+| `apply_gaia_quality_filters(input_file, output_dir, ...)` | the Babusiaux+ 2018 photometric + astrometric cuts, with per-filter counts and justifications |
+| `compute_gaia_absolute_magnitudes(input_file, output_dir)` | M_G = G + 5 log₁₀(ϖ/mas) − 10 |
+| `plot_gaia_cmd(input_file, output_dir, ...)` | HRD (log density, or points for < 5000 stars), axes matched to the published Fig. 5c |
 | `compare_distance_shells(input_file, output_dir, ...)` | side-by-side HRDs within 25/50/100 pc — the full published Fig. 5 |
 | `plot_kinematics_cmd(input_file, output_dir, ...)` | velocity-sliced HRDs + mean-v_T map (Fig. 7) |
 | `plot_variable_stars_cmd(input_file, output_dir)` | DR2-flagged variables on the HRD (Fig. 15) |
 | `plot_infrared_cmd(input_file, output_dir)` | the 2MASS infrared HRD (Fig. 6) |
-| `plot_sky_map(input_file, output_dir)` | the sample in galactic coordinates — Hyades + scanning-law holes |
+| `plot_gaia_sky_map(input_file, output_dir)` | the sample in galactic coordinates — Hyades + scanning-law holes |
 | `plot_hyades(input_file, output_dir)` | pull the Hyades out of the field by parallax + proper motion (Sect. 4) |
 | `plot_white_dwarfs(input_file, output_dir)` | zoom on the white dwarf sequence and its H/He bifurcation (Fig. 13) |
-| `plot_luminosity_function(input_file, output_dir)` | the stellar census: M_G histogram, 25 pc vs 100 pc completeness, the Sun's rank |
+| `plot_gaia_luminosity_function(input_file, output_dir)` | the stellar census: M_G histogram, R/4 vs R completeness (25 vs 100 pc by default), the Sun's rank |
+
+Every plot tool takes `save_pdf=true` for a vector PDF next to the PNG.
+Figures use matplotlib's built-in STIX mathtext (no TeX install needed on
+the server), a colourblind-safe palette, and draw small samples as points
+rather than a sparse density map. Titles and messages state the actual
+sample radius; the published 212,728-star comparison is only quoted for
+the 100 pc sample.
+
+**Renamed (Oct 2026)** to avoid collisions with other MCP servers' generic
+tool names — update any saved prompts/skills, and redeploy hosted servers:
+`apply_quality_filters` → `apply_gaia_quality_filters`,
+`compute_absolute_magnitudes` → `compute_gaia_absolute_magnitudes`,
+`plot_cmd` → `plot_gaia_cmd`, `plot_sky_map` → `plot_gaia_sky_map`,
+`plot_luminosity_function` → `plot_gaia_luminosity_function`.
+`set_dispatch` / `get_dispatch` / `auth_status` keep their names (a
+cross-server convention the hep-genesis client matches by name).
 
 ### The query
 
